@@ -23,12 +23,13 @@ from logger_config import (
     log_email_operation
 )
 from pdf_utils import (
-    send_chat_message,
     get_chat_history,
-    process_completed_interview,
     create_lyzr_agent,
     create_lyzr_rag_kb,
     link_agent_with_rag,
+    upload_pdf_to_s3,
+    generate_pdf_from_chat_history,
+    train_pdf_directly,
 )
 load_dotenv()
 
@@ -1377,7 +1378,7 @@ def complete_interview_by_session(session_id: str):
 
 @app.post("/interview/process")
 def process_interview_completion(request: InterviewProcessRequest):
-    """Process completed interview: generate PDF, upload to S3, parse and train KB"""
+    """Process completed interview: generate PDF, upload to S3, and train KB directly"""
     try:
         api_logger.info(f"Processing interview completion for user: {request.user_id}, email: {request.email}")
         
@@ -1397,80 +1398,125 @@ def process_interview_completion(request: InterviewProcessRequest):
         api_key = user_account.get("api_key") if user_account else None
         rag_id = request.rag_id or (user_account.get("rag_id") if user_account else None)
         
-        # Process the completed interview
-        result = process_completed_interview(
-            user_id=request.user_id,
-            email=request.email,
-            rag_id=rag_id,
-            api_key=api_key
-        )
+        if not api_key:
+            raise HTTPException(status_code=400, detail="No API key found for user")
         
-        # Check if there was an error in processing
-        if result.get("error"):
-            api_logger.warning(f"Interview processing had issues: {result['error']}")
-            raise HTTPException(status_code=400, detail=result["error"])
+        if not rag_id:
+            raise HTTPException(status_code=400, detail="No RAG ID provided or found for user")
         
-        # Update interview record with processing results BUT PRESERVE "completed" status
-        current_status = interview.get("status", "completed")
+        # STEP 1: Get chat history (once)
+        api_logger.info(f"Step 1: Getting chat history for session: {session_id}")
+        chat_history = get_chat_history(session_id, api_key)
         
-        # Only change status to "processed" if it wasn't already "completed"
-        # If user clicked "Complete Interview", status should remain "completed"
-        if current_status != "completed":
-            current_status = "processed"
+        if not chat_history:
+            api_logger.warning(f"No chat history found for session: {session_id}")
+            raise HTTPException(status_code=404, detail="No chat history found")
         
+        api_logger.info(f"Retrieved {len(chat_history)} messages from chat history")
+        
+        # STEP 2: Generate PDF (once)
+        api_logger.info(f"Step 2: Generating PDF from chat history")
+        pdf_content = generate_pdf_from_chat_history(chat_history, request.user_id, request.email)
+        api_logger.info(f"PDF generated successfully, size: {len(pdf_content)} bytes")
+        
+        # STEP 3: Upload to S3
+        s3_upload_success = False
+        s3_url = None
+        s3_error = None
+        
+        try:
+            api_logger.info(f"Step 3: Uploading PDF to S3 for session: {session_id}")
+            s3_url = upload_pdf_to_s3(pdf_content, request.user_id, request.email, session_id)
+            s3_upload_success = True
+            api_logger.info(f"Successfully uploaded PDF to S3 for session: {session_id}")
+        except Exception as s3_exception:
+            api_logger.warning(f"S3 upload failed for session {session_id}: {s3_exception}")
+            s3_error = str(s3_exception)
+        
+        # STEP 4: Train KB directly (no HTTP call)
+        training_success = False
+        training_result = {}
+        training_error = None
+        
+        try:
+            api_logger.info(f"Step 4: Training knowledge base directly with PDF")
+            training_result = train_pdf_directly(
+                pdf_content=pdf_content,
+                rag_id=rag_id,
+                api_key=api_key,
+                data_parser="llmsherpa",
+                chunk_size=1000,
+                chunk_overlap=100,
+                extra_info="{}"
+            )
+            
+            training_success = "successfully" in training_result.get("message", "").lower()
+            api_logger.info(f"Knowledge base training completed, success: {training_success}")
+            
+        except Exception as training_exception:
+            api_logger.error(f"KB training failed for session {session_id}: {training_exception}")
+            training_error = str(training_exception)
+            training_result = {
+                "success": False,
+                "error": training_error,
+                "error_type": type(training_exception).__name__
+            }
+        
+        # Update interview record with all results
         update_data = {
-            "status": current_status,  # Preserve "completed" status if it exists
+            "status": "processed",
             "processed_at": datetime.utcnow(),
             "session_id": session_id,
-            "pdf_generated": result.get("pdf_generated", False),
-            "s3_upload_success": result.get("s3_upload_success", False)
+            "pdf_generated": True,
+            "pdf_size_bytes": len(pdf_content),
+            "s3_upload_success": s3_upload_success,
+            "training_success": training_success,
+            "rag_id": rag_id,
+            "chat_messages_count": len(chat_history)
         }
         
         # Add S3 URL if upload was successful
-        if result.get("pdf_s3_url"):
-            update_data["pdf_s3_url"] = result["pdf_s3_url"]
+        if s3_url:
+            update_data["pdf_s3_url"] = s3_url
+        if s3_error:
+            update_data["s3_error"] = s3_error
         
-        # Add KB training info if available
-        if request.rag_id:
-            update_data["rag_id"] = request.rag_id
-            update_data["kb_trained"] = result.get("kb_trained", False)
-            if result.get("kb_error"):
-                update_data["kb_error"] = result["kb_error"]
+        # Add training results
+        if training_result:
+            update_data["training_result"] = training_result
+        if training_error:
+            update_data["training_error"] = training_error
         
         interviews_col.update_one(
             {"token": token},
             {"$set": update_data}
         )
         
-        # Update chat session if exists BUT PRESERVE "completed" status
-        existing_chat_session = chat_sessions_col.find_one({"session_id": session_id})
-        current_session_status = existing_chat_session.get("session_status", "completed") if existing_chat_session else "completed"
-        
-        # Only change status to "processed" if it wasn't already "completed"
-        if current_session_status != "completed":
-            current_session_status = "processed"
-        
+        # Update chat session
         chat_session_update = {
-            "session_status": current_session_status,  # Preserve "completed" if it exists
+            "session_status": "processed",
             "processed_at": datetime.utcnow(),
-            "pdf_generated": result.get("pdf_generated", False)
+            "pdf_generated": True,
+            "pdf_size_bytes": len(pdf_content),
+            "s3_upload_success": s3_upload_success,
+            "training_success": training_success
         }
         
-        if result.get("pdf_s3_url"):
-            chat_session_update["pdf_s3_url"] = result["pdf_s3_url"]
+        if s3_url:
+            chat_session_update["pdf_s3_url"] = s3_url
+        if training_result:
+            chat_session_update["training_result"] = training_result
         
         chat_sessions_col.update_one(
             {"session_id": session_id},
             {"$set": chat_session_update}
         )
         
-        # Create success message based on what was accomplished
-        success_parts = []
-        if result.get("pdf_generated"):
-            success_parts.append("PDF generated")
-        if result.get("s3_upload_success"):
+        # Create comprehensive response
+        success_parts = ["PDF generated"]
+        if s3_upload_success:
             success_parts.append("uploaded to S3")
-        if result.get("kb_trained"):
+        if training_success:
             success_parts.append("knowledge base trained")
         
         success_message = f"Interview processed successfully: {', '.join(success_parts)}"
@@ -1486,7 +1532,16 @@ def process_interview_completion(request: InterviewProcessRequest):
             "email": request.email,
             "session_id": session_id,
             "interview_token": token,
-            "processing_result": result
+            "pdf_generated": True,
+            "pdf_size_bytes": len(pdf_content),
+            "chat_messages_count": len(chat_history),
+            "s3_upload_success": s3_upload_success,
+            "s3_url": s3_url,
+            "s3_error": s3_error,
+            "training_success": training_success,
+            "training_result": training_result,
+            "training_error": training_error,
+            "rag_id": rag_id
         }
         
     except HTTPException:
@@ -1574,4 +1629,3 @@ def get_user_kb_pdfs(user_id: str):
     except Exception as e:
         api_logger.error(f"Failed to fetch KB PDFs for user {user_id}: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to fetch PDFs: {str(e)}")
-

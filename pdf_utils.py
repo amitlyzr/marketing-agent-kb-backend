@@ -67,6 +67,99 @@ def get_s3_client():
         api_logger.error(f"Failed to create S3 client: {e}", exc_info=True)
         raise
 
+def create_simple_pdf_from_text(text: str) -> bytes:
+    """
+    Create a simple PDF from plain text content
+    
+    Args:
+        text: Text content to convert to PDF
+        
+    Returns:
+        PDF content as bytes
+    """
+    try:
+        api_logger.info(f"Creating simple PDF from text, length: {len(text)} characters")
+        
+        buffer = io.BytesIO()
+        
+        # Create PDF document
+        doc = SimpleDocTemplate(
+            buffer,
+            pagesize=letter,
+            rightMargin=72,
+            leftMargin=72,
+            topMargin=72,
+            bottomMargin=72
+        )
+        
+        # Get styles
+        styles = getSampleStyleSheet()
+        
+        # Create custom style for content
+        content_style = ParagraphStyle(
+            'Content',
+            parent=styles['Normal'],
+            fontSize=11,
+            textColor='black',
+            spaceAfter=12,
+            alignment=TA_LEFT,
+            leftIndent=0,
+            rightIndent=0
+        )
+        
+        title_style = ParagraphStyle(
+            'Title',
+            parent=styles['Title'],
+            fontSize=16,
+            textColor='darkblue',
+            spaceAfter=20,
+            alignment=TA_LEFT
+        )
+        
+        # Build story
+        story = []
+        
+        # Add title
+        story.append(Paragraph("Training Content", title_style))
+        story.append(Spacer(1, 12))
+        
+        # Add timestamp
+        timestamp = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')
+        story.append(Paragraph(f"Generated: {timestamp}", styles['Normal']))
+        story.append(Spacer(1, 20))
+        
+        # Process text content
+        # Handle long text by splitting into paragraphs
+        if len(text) > 50000:  # If text is very long, truncate for PDF
+            text = text[:50000] + "\n\n[Content truncated for PDF generation]"
+        
+        # Clean and format text
+        text = text.replace('\n', '<br/>')
+        text = text.replace('<', '&lt;').replace('>', '&gt;')
+        
+        # Split into chunks if text is very long to avoid ReportLab issues
+        max_chunk_size = 10000
+        if len(text) > max_chunk_size:
+            chunks = [text[i:i+max_chunk_size] for i in range(0, len(text), max_chunk_size)]
+            for i, chunk in enumerate(chunks):
+                story.append(Paragraph(chunk, content_style))
+                if i < len(chunks) - 1:  # Add spacer between chunks except for last
+                    story.append(Spacer(1, 12))
+        else:
+            story.append(Paragraph(text, content_style))
+        
+        # Build PDF
+        doc.build(story)
+        buffer.seek(0)
+        pdf_content = buffer.getvalue()
+        
+        api_logger.info(f"Simple PDF created successfully, size: {len(pdf_content)} bytes")
+        return pdf_content
+        
+    except Exception as e:
+        api_logger.error(f"Failed to create simple PDF from text: {e}", exc_info=True)
+        raise
+
 def generate_conversation_pdf(chat_history: List[Dict], user_id: str, email: str, session_id: str) -> bytes:
     """
     Generate a beautifully formatted PDF from chat conversation history
@@ -396,7 +489,6 @@ def upload_pdf_to_s3(pdf_content: bytes, user_id: str, email: str, session_id: s
             Key=s3_key,
             Body=pdf_content,
             ContentType='application/pdf',
-            ACL='public-read',
             Metadata={
                 'user_id': user_id,
                 'email': email,
@@ -531,55 +623,78 @@ def train_pdf_directly(
             # Small delay to ensure file system operations are complete
             time.sleep(0.5)
             
+            # Read the PDF content into memory first to avoid file handle issues
             with open(temp_file_path, 'rb') as pdf_file:
-                # Prepare files and data exactly like debug app
-                files = {
-                    'file': ('chat_interview.pdf', pdf_file, 'application/pdf')
-                }
-                data = {
-                    'data_parser': data_parser,
-                    'chunk_size': str(chunk_size),
-                    'chunk_overlap': str(chunk_overlap),
-                    'extra_info': extra_info
-                }
-                headers = {
-                    'accept': 'application/json',
-                    'x-api-key': lyzr_key
-                }
-                
-                api_logger.info(f"Request data: {data}")
-                api_logger.info(f"Request headers (without API key): {dict((k, v) for k, v in headers.items() if k != 'x-api-key')}")
-                
-                api_logger.info("Sending direct PDF training request to Lyzr API")
-                # Use longer timeout like debug app
-                response = requests.post(url, files=files, data=data, headers=headers, timeout=120)
-                
-                api_logger.info(f"Training response status code: {response.status_code}")
-                api_logger.info(f"Training response headers: {dict(response.headers)}")
-                api_logger.info(f"Training response content preview: {response.text[:500]}...")
-                
-                if not response.ok:
-                    api_logger.error(f"Direct PDF training failed with status {response.status_code}")
-                    api_logger.error(f"Response content: {response.text}")
-                    response.raise_for_status()
-                
+                pdf_file_content = pdf_file.read()
+            
+            # Prepare multipart/form-data payload exactly like the curl example
+            files = {
+                'file': ('chat_interview.pdf', pdf_file_content, 'application/pdf')
+            }
+            
+            # Form data fields - all as strings for multipart/form-data
+            data = {
+                'data_parser': data_parser,
+                'chunk_size': str(chunk_size),
+                'chunk_overlap': str(chunk_overlap),
+                'extra_info': extra_info
+            }
+            
+            # Headers - don't set Content-Type, let requests handle multipart/form-data encoding
+            headers = {
+                'accept': 'application/json',
+                'x-api-key': lyzr_key
+            }
+            
+            api_logger.info(f"Form data fields: {data}")
+            api_logger.info(f"File: chat_interview.pdf, size: {len(pdf_file_content)} bytes, type: application/pdf")
+            api_logger.info(f"Request headers (without API key): {dict((k, v) for k, v in headers.items() if k != 'x-api-key')}")
+            
+            api_logger.info("🚀 Sending direct PDF training request to Lyzr API with multipart/form-data")
+            api_logger.info(f"📤 Upload Details:")
+            api_logger.info(f"   - URL: {url}")
+            api_logger.info(f"   - Method: POST")
+            api_logger.info(f"   - Content-Type: multipart/form-data (auto-generated)")
+            api_logger.info(f"   - File name: chat_interview.pdf")
+            api_logger.info(f"   - File size: {len(pdf_file_content)} bytes")
+            api_logger.info(f"   - RAG ID: {rag_id}")
+            
+            # Use longer timeout and let requests handle multipart encoding
+            response = requests.post(url, files=files, data=data, headers=headers, timeout=120)
+            
+            api_logger.info(f"📥 Training response status code: {response.status_code}")
+            api_logger.info(f"📥 Training response headers: {dict(response.headers)}")
+            api_logger.info(f"📥 Training response content: {response.text}")
+            
+            if not response.ok:
+                api_logger.error(f"❌ Direct PDF training failed with status {response.status_code}")
+                api_logger.error(f"❌ Response content: {response.text}")
+                api_logger.error(f"❌ This suggests the upload format or parameters are incorrect")
+                response.raise_for_status()
+            
+            try:
                 result = response.json()
-                api_logger.info(f"Direct PDF training completed successfully for rag_id: {rag_id}")
-                api_logger.info(f"Training response keys: {list(result.keys()) if isinstance(result, dict) else 'Not a dict'}")
-                
+                api_logger.info(f"✅ Direct PDF training completed successfully for rag_id: {rag_id}")
+                api_logger.info(f"📊 Training response keys: {list(result.keys()) if isinstance(result, dict) else 'Not a dict'}")
+                api_logger.info(f"📊 Training result: {result}")
                 return result
+            except json.JSONDecodeError as json_err:
+                api_logger.error(f"❌ Failed to parse JSON response: {json_err}")
+                api_logger.error(f"❌ Raw response: {response.text}")
+                raise Exception(f"Invalid JSON response from training API: {response.text}")
                 
         finally:
-            # Robust cleanup of temporary file
+            # KEEP THE PDF FILE FOR DEBUGGING - DON'T DELETE IT
             try:
                 if os.path.exists(temp_file_path):
-                    api_logger.info(f"Cleaning up temporary file: {temp_file_path}")
-                    os.unlink(temp_file_path)
-                    api_logger.info(f"Successfully deleted temporary file: {temp_file_path}")
+                    api_logger.info(f"🔍 KEEPING PDF file for inspection: {temp_file_path}")
+                    api_logger.info(f"📁 PDF file size: {os.path.getsize(temp_file_path)} bytes")
+                    api_logger.info(f"📂 You can find the PDF at: {temp_file_path}")
+                    # DO NOT DELETE: os.unlink(temp_file_path)
                 else:
-                    api_logger.warning(f"Temporary file already deleted or does not exist: {temp_file_path}")
+                    api_logger.warning(f"Temporary file does not exist: {temp_file_path}")
             except Exception as cleanup_error:
-                api_logger.error(f"Failed to cleanup temporary file {temp_file_path}: {cleanup_error}")
+                api_logger.error(f"Failed to check temporary file {temp_file_path}: {cleanup_error}")
                 # Don't raise here as it would mask the original error
             
     except Exception as e:
@@ -633,22 +748,24 @@ def send_chat_message(user_id: str, agent_id: str, session_id: str, message: str
 
 def process_completed_interview(user_id: str, email: str, rag_id: str = None, api_key: str = None) -> Dict:
     """
-    Process completed interview: generate PDF, train KB directly, then upload to S3
+    Process completed interview: generate PDF and upload to S3
     
-    NEW WORKFLOW ORDER (based on successful testing):
+    UPDATED WORKFLOW ORDER:
     1. Get chat history from Lyzr API
     2. Generate PDF from chat history
-    3. Train KB directly with PDF (PRIORITY - using working /v3/train/pdf/ endpoint)
-    4. Upload PDF to S3 (SECONDARY - optional, for backup/storage)
+    3. Upload PDF to S3 (for backup/storage)
+    
+    Note: KB training is now handled separately by pdf_training_workflow() 
+    which should be called BEFORE this function.
     
     Args:
         user_id: User ID
         email: Email address
-        rag_id: Optional RAG knowledge base ID
+        rag_id: Optional RAG knowledge base ID (for reference only)
         api_key: Lyzr API key (if not provided, uses environment variable)
         
     Returns:
-        Processing result with KB training status and S3 URL
+        Processing result with PDF generation and S3 upload status
     """
     try:
         session_id = f"{user_id}+{email}"
@@ -681,52 +798,16 @@ def process_completed_interview(user_id: str, email: str, rag_id: str = None, ap
         wait_between_operations(1.0)
         
         if rag_id:
-            try:
-                api_logger.info(f"Step 3: Training KB {rag_id} directly with PDF for session: {session_id}")
-                
-                # Wait before training to ensure any previous operations are complete
-                wait_between_operations(2.0)
-                
-                # Use the SAME PDF content that was already generated above
-                # This ensures consistency between what we generate and what we train
-                train_response = train_pdf_directly(
-                    pdf_content=pdf_content,
-                    rag_id=rag_id,
-                    api_key=api_key,
-                    data_parser="llmsherpa",
-                    chunk_size=1000,
-                    chunk_overlap=100,
-                    extra_info="{}"
-                )
-                api_logger.info(f"Direct PDF training completed successfully")
-                
-                result.update({
-                    "rag_id": rag_id,
-                    "kb_trained": True,
-                    "train_response": train_response,
-                    "training_method": "direct_pdf"
-                })
-                api_logger.info(f"Successfully trained KB {rag_id} for session: {session_id} using direct PDF method")
-                
-                # Wait after training before S3 upload
-                wait_between_operations(2.0)
-
-            except Exception as kb_error:
-                api_logger.error(f"KB training failed for session {session_id}: {kb_error}", exc_info=True)
-                api_logger.error(f"KB error type: {type(kb_error).__name__}")
-                api_logger.error(f"KB error details: {str(kb_error)}")
-                result.update({
-                    "rag_id": rag_id,
-                    "kb_trained": False,
-                    "kb_error": str(kb_error),
-                    "kb_error_type": type(kb_error).__name__,
-                    "training_method": "direct_pdf"
-                })
+            api_logger.info(f"RAG ID {rag_id} provided - training should have been handled by pdf_training_workflow()")
+            result.update({
+                "rag_id": rag_id,
+                "kb_training_note": "Training handled separately by pdf_training_workflow"
+            })
         else:
-            api_logger.info("No RAG ID provided, skipping KB training")
+            api_logger.info("No RAG ID provided, skipping KB training note")
         
         try:
-            api_logger.info(f"Step 4: Uploading PDF to S3 for session: {session_id}")
+            api_logger.info(f"Step 3: Uploading PDF to S3 for session: {session_id}")
             s3_url = upload_pdf_to_s3(pdf_content, user_id, email, session_id)
             result["pdf_s3_url"] = s3_url
             result["s3_upload_success"] = True
@@ -953,56 +1034,55 @@ def link_agent_with_rag(agent_id: str, rag_id: str, agent_name: str, agent_promp
         api_logger.error(f"Failed to link agent {agent_id} with RAG {rag_id}: {e}")
         raise
 
-def pdf_training_workflow(api_key: str, rag_id: str, session_id) -> Dict:
-    """
-    Test the complete PDF training workflow with sample content
+# def pdf_training_workflow(api_key: str, rag_id: str, session_id) -> Dict:
+#     """
+#     Test the complete PDF training workflow with sample content
     
-    Args:
-        api_key: Lyzr API key
-        rag_id: RAG knowledge base ID
-        test_text: Optional test text content
+#     Args:
+#         api_key: Lyzr API key
+#         rag_id: RAG knowledge base ID
+#         test_text: Optional test text content
         
-    Returns:
-        Test result
-    """
-    try:
-        api_logger.info("Starting PDF training workflow test")
+#     Returns:
+#         Test result
+#     """
+#     try:
+#         api_logger.info("Starting PDF training workflow test")
 
-        test_text = get_chat_history(session_id=session_id, api_key=api_key)
-        test_text = json.dumps(test_text)
+#         test_text = get_chat_history(session_id=session_id, api_key=api_key)
+#         test_text = json.dumps(test_text)
 
-        api_logger.info("Step 1: Generating PDF from test text")
-        from debug_api import create_simple_pdf_from_text
-        pdf_content = create_simple_pdf_from_text(test_text)
-        api_logger.info(f"PDF generated successfully, size: {len(pdf_content)} bytes")
+#         api_logger.info("Step 1: Generating PDF from test text")
+#         pdf_content = create_simple_pdf_from_text(test_text)
+#         api_logger.info(f"PDF generated successfully, size: {len(pdf_content)} bytes")
         
-        api_logger.info("Step 2: Training KB directly with PDF")
-        train_response = train_pdf_directly(
-            pdf_content=pdf_content,
-            rag_id=rag_id,
-            api_key=api_key,
-            data_parser="llmsherpa",
-            chunk_size=1000,
-            chunk_overlap=100,
-            extra_info="{}"
-        )
+#         api_logger.info("Step 2: Training KB directly with PDF")
+#         train_response = train_pdf_directly(
+#             pdf_content=pdf_content,
+#             rag_id=rag_id,
+#             api_key=api_key,
+#             data_parser="llmsherpa",
+#             chunk_size=1000,
+#             chunk_overlap=100,
+#             extra_info="{}"
+#         )
         
-        result = {
-            "test_status": "success",
-            "pdf_size": len(pdf_content),
-            "rag_id": rag_id,
-            "train_response": train_response,
-            "test_text_length": len(test_text)
-        }
+#         result = {
+#             "test_status": "success",
+#             "pdf_size": len(pdf_content),
+#             "rag_id": rag_id,
+#             "train_response": train_response,
+#             "test_text_length": len(test_text)
+#         }
         
-        api_logger.info(f"PDF training workflow test completed successfully: {result}")
-        return result
+#         api_logger.info(f"PDF training workflow test completed successfully: {result}")
+#         return result
         
-    except Exception as e:
-        api_logger.error(f"PDF training workflow test failed: {e}", exc_info=True)
-        result = {
-            "test_status": "failed",
-            "error": str(e),
-            "error_type": type(e).__name__
-        }
-        return result
+#     except Exception as e:
+#         api_logger.error(f"PDF training workflow test failed: {e}", exc_info=True)
+#         result = {
+#             "test_status": "failed",
+#             "error": str(e),
+#             "error_type": type(e).__name__
+#         }
+#         return result

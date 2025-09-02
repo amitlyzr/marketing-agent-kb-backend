@@ -468,4 +468,4 @@ if __name__ == "__main__":
         except Exception as e:
             scheduler_logger.error(f"Scheduler error: {e}")
         
-        time.sleep(180)  # run every 5 minutes
+        time.sleep(300)  # run every 5 minutes
