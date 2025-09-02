@@ -1,0 +1,11 @@
+fastapi==0.104.1
+uvicorn==0.24.0
+pymongo==4.6.0
+python-multipart==0.0.6
+pydantic[email]==2.5.0
+requests==2.31.0
+python-dotenv==1.0.0
+reportlab==4.0.7
+boto3==1.34.0
+aiofiles==23.2.0
+
