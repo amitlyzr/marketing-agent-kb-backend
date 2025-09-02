@@ -5,7 +5,7 @@ Usage: python test_pdf_training.py <api_key> <rag_id>
 """
 
 import sys
-from pdf_utils import test_pdf_training_workflow
+from pdf_utils import pdf_training_workflow
 
 def main():
     if len(sys.argv) != 3:
@@ -21,7 +21,7 @@ def main():
     print("-" * 50)
     
     try:
-        result = test_pdf_training_workflow(api_key, rag_id)
+        result = pdf_training_workflow(api_key, rag_id, session_id="mem_cme8pevbm00hi0wmc3e164dvx+nhce.amit@gmail.com")
         
         if result["test_status"] == "success":
             print("✅ PDF Training Test PASSED!")
