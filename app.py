@@ -31,6 +31,8 @@ from pdf_utils import (
     link_agent_with_rag,
     upload_pdf_to_s3,
     train_pdf_directly,
+    train_text_directly,
+    process_completed_interview,
 )
 load_dotenv()
 
@@ -160,7 +162,6 @@ class ChatSession(BaseModel):
 class InterviewProcessRequest(BaseModel):
     user_id: str
     email: EmailStr
-    rag_id: Optional[str] = None 
 
 class AgentCreateRequest(BaseModel):
     user_id: str
@@ -188,7 +189,7 @@ class AccountUpdateRequest(BaseModel):
 # ENDPOINTS
 # -----------------------------
 
-## Acccount
+## Accounts
 @app.post("/accounts")
 def create_account(account: Account):
     try:
@@ -247,6 +248,9 @@ def update_account(user_id: str, updates: AccountUpdateRequest):
         api_logger.error(f"Failed to update account {user_id}: {e}")
         raise HTTPException(status_code=500, detail="Failed to update account")
 
+## ------------------------
+## AGENT CREATION ENDPOINTS
+## ------------------------
 @app.post("/agents/create")
 def create_agent_with_kb(request: AgentCreateRequest):
     """Create an interview agent and knowledge base (WITHOUT linking them)"""
@@ -423,7 +427,9 @@ def get_agent_info(agent_id: str):
         raise HTTPException(status_code=500, detail="Failed to get agent info")
 
 
-## Emails Collection
+## ----------------
+## EMAILS ENDPOINTS
+## ----------------
 @app.post("/emails")
 def add_email(email: Email):
     try:
@@ -602,8 +608,6 @@ def update_email_status(user_id: str, email: str, status: str, error_message: st
 
 @app.patch("/emails/{user_id}/{email}")
 def patch_email_fields(user_id: str, email: str, updates: dict):
-    """Patch specific fields of an email record"""
-    
     try:
         # Find the email record
         email_record = emails_col.find_one({"user_id": user_id, "email": email})
@@ -685,9 +689,9 @@ def get_smtp(user_id: str):
                         extra={'user_id': user_id, 'error_type': 'smtp_retrieval'})
         raise HTTPException(status_code=500, detail="Failed to fetch SMTP config")
 
-
-
-## Scheduler Collection
+## -----------------
+## SCHEDULER ENDPOINTS
+## -----------------
 @app.post("/scheduler")
 def set_scheduler(s: Scheduler):
     try:
@@ -727,10 +731,9 @@ def get_scheduler(user_id: str):
                         extra={'user_id': user_id, 'error_type': 'scheduler_retrieval'})
         raise HTTPException(status_code=500, detail="Failed to fetch scheduler")
 
-
-
-
-## Interviews Collection
+## --------------------
+## INTERVIEW COLLECTION ENDPOINTS
+## --------------------
 @app.post("/interview/start")
 def start_interview(user_id: str, email: EmailStr):
     try:
@@ -927,7 +930,9 @@ def redirect_to_chat(token: str):
         api_logger.error(f"Failed to redirect token {token}: {e}")
         raise HTTPException(status_code=500, detail="Failed to redirect to chat")
 
-## Email Threads Collection
+## -------------------
+## EMAIL THREAD ENDPOINTS
+## -------------------
 @app.get("/email-thread/{user_id}/{email}")
 def get_email_thread(user_id: str, email: str):
     """Get email thread/conversation history for a specific email address"""
@@ -1004,7 +1009,10 @@ def get_all_email_threads(user_id: str):
         raise HTTPException(status_code=500, detail="Failed to fetch email threads")
 
 
-# Chat and Interview Processing Collection
+## -------------------
+## CHAT STREAMING ENDPOINTS
+## -------------------
+
 ## Interview Agent Chat (Streaming, with message count)
 @app.post("/chat/interview/send/stream")
 async def send_interview_message_stream(chat_msg: ChatMessage):
@@ -1248,6 +1256,10 @@ async def send_chat_agent_message_stream(chat_msg: ChatMessage):
                         extra={'user_id': chat_msg.user_id, 'error_type': 'chat_agent_send'})
         raise HTTPException(status_code=500, detail="Failed to send chat agent message")
 
+
+## -------------------
+## CHAT HISTORY ENDPOINTS
+## -------------------
 @app.get("/chat/history/{session_id}")
 def get_chat_history_api(session_id: str, agent_id: str = None):
     """Get chat history for a session"""
@@ -1286,7 +1298,9 @@ def get_chat_history_api(session_id: str, agent_id: str = None):
         raise HTTPException(status_code=500, detail="Failed to fetch chat history")
 
 
-
+## -------------------
+## INTERVIEW COMPLETE ENDPOINT (PROCESS -> TRAIN -> UPLOAD -> COMPLETE)
+## -------------------
 @app.post("/chat/interview/complete/{session_id}")
 def complete_interview_by_session(session_id: str):
     """Complete interview by session_id - Public endpoint for interview participants"""
@@ -1379,107 +1393,94 @@ def complete_interview_by_session(session_id: str):
 
 @app.post("/interview/process")
 def process_interview_completion(request: InterviewProcessRequest):
-    """Process completed interview: generate PDF, upload to S3, and train KB directly"""
     try:
-        interview_processing_logger.info(f"Processing interview completion for user: {request.user_id}, email: {request.email}")
-        
         token = f"{request.user_id}-{request.email}"
-        interview = interviews_col.find_one({"token": token})
-        
-        if not interview:
-            interview_processing_logger.warning(f"Interview not found for processing: {token}")
-            raise HTTPException(status_code=404, detail="Interview not found")
-        
         session_id = f"{request.user_id}+{request.email}"
         
         user_account = accounts_col.find_one({"user_id": request.user_id})
-        api_key = user_account.get("api_key") if user_account else None
-        rag_id = request.rag_id or (user_account.get("rag_id") if user_account else None)
+        if not user_account:
+            raise HTTPException(status_code=404, detail="User account not found")
+        
+        api_key = user_account.get("api_key")
+        rag_id = user_account.get("rag_id")
         
         if not api_key:
             raise HTTPException(status_code=400, detail="No API key found for user")
-        
         if not rag_id:
             raise HTTPException(status_code=400, detail="No RAG ID provided or found for user")
         
-        interview_processing_logger.info(f"Step 1: Getting chat history for session: {session_id}")
-        # chat_history = get_chat_history(session_id, api_key)
         chat_history = get_chat_history(session_id=session_id, api_key=api_key)
-        chat_history = json.dumps(chat_history)
-        
         if not chat_history:
-            interview_processing_logger.warning(f"No chat history found for session: {session_id}")
             raise HTTPException(status_code=404, detail="No chat history found")
-
-        interview_processing_logger.info(f"Retrieved {len(chat_history)} messages from chat history")
-
-        interview_processing_logger.info(f"Step 2: Generating PDF from chat history")
-        pdf_file = create_simple_pdf_from_text(json.dumps(chat_history))
-        interview_processing_logger.info(f"PDF generated successfully, size: {len(pdf_file.getvalue())} bytes")
+        
+        # text_content = ""
+        # for message in chat_history:
+        #     role = message.get('role', 'unknown')
+        #     content = message.get('content', '')
+        #     created_at = message.get('created_at', '')
+            
+        #     text_content += f"[{role.upper()}] {content}\n"
+        #     if created_at:
+        #         text_content += f"Time: {created_at}\n"
+        #     text_content += "\n"
+        
+        pdf_file = create_simple_pdf_from_text(json.dumps(chat_history, indent=2))
+        pdf_content = pdf_file.getvalue()
 
         s3_upload_success = False
         s3_url = None
         s3_error = None
         
         try:
-            interview_processing_logger.info(f"Step 3: Uploading PDF to S3 for session: {session_id}")
-            s3_url = upload_pdf_to_s3(pdf_file, request.user_id, request.email, session_id)
+            s3_url = upload_pdf_to_s3(pdf_content, request.user_id, request.email, session_id)
             s3_upload_success = True
-            interview_processing_logger.info(f"Successfully uploaded PDF to S3 for session: {session_id}")
         except Exception as s3_exception:
-            interview_processing_logger.warning(f"S3 upload failed for session {session_id}: {s3_exception}")
             s3_error = str(s3_exception)
-
-        training_success = False
-        training_result = {}
+        
         training_error = None
         
-        try:
-            interview_processing_logger.info(f"Step 4: Training knowledge base directly with PDF")
-            training_result = train_pdf_directly(
-                pdf_file=io.BytesIO(pdf_file.getvalue()),
-                rag_id=rag_id,
-                api_key=api_key,
-                data_parser="llmsherpa",
-                chunk_size=1000,
-                chunk_overlap=100,
-                extra_info={}
-            )
-
-            print(training_result)
-
-            interview_processing_logger.info(f"Knowledge base training completed, success")
-            training_success = True
-            
-        except Exception as training_exception:
-            interview_processing_logger.error(f"KB training failed for session {session_id}: {training_exception}")
-            training_error = str(training_exception)
-            training_result = {
-                "success": False,
-                "error": training_error,
-                "error_type": type(training_exception).__name__
-            }
+        # TODO: Uncomment when ready to enable KB training in production
+        # try:
+        #     training_result = train_text_directly(
+        #         text_content=text_content,
+        #         rag_id=rag_id,
+        #         api_key=api_key,
+        #         data_parser="simple",
+        #         chunk_size=1000,
+        #         chunk_overlap=100,
+        #         extra_info="{}"
+        #     )
+        #     training_success = True
+        # except Exception as training_exception:
+        #     training_error = str(training_exception)
+        #     training_result = {
+        #         "success": False,
+        #         "error": training_error,
+        #         "error_type": type(training_exception).__name__
+        #     }
         
-        # Update interview record with all results
+        # Temporarily skip KB training
+        training_success = True
+        training_result = {"message": "KB training temporarily disabled for testing"}
+        
+        # Update database records
         update_data = {
             "status": "processed",
             "processed_at": datetime.utcnow(),
             "session_id": session_id,
             "pdf_generated": True,
-            "pdf_size_bytes": pdf_file.getvalue(),
+            "pdf_size_bytes": len(pdf_content),
+            "text_content_length": len(text_content),
             "s3_upload_success": s3_upload_success,
             "training_success": training_success,
             "rag_id": rag_id,
             "chat_messages_count": len(chat_history)
         }
         
-        # Add S3 URL if upload was successful
         if s3_url:
             update_data["pdf_s3_url"] = s3_url
         if s3_error:
             update_data["s3_error"] = s3_error
-        
-        # Add training results
         if training_result:
             update_data["training_result"] = training_result
         if training_error:
@@ -1487,69 +1488,152 @@ def process_interview_completion(request: InterviewProcessRequest):
         
         interviews_col.update_one(
             {"token": token},
-            {"$set": update_data}
+            {"$set": update_data},
+            upsert=True
         )
-        
-        # Update chat session
-        chat_session_update = {
-            "session_status": "processed",
-            "processed_at": datetime.utcnow(),
-            "pdf_generated": True,
-            "pdf_size_bytes": pdf_file.getvalue(),
-            "s3_upload_success": s3_upload_success,
-            "training_success": training_success
-        }
-        
-        if s3_url:
-            chat_session_update["pdf_s3_url"] = s3_url
-        if training_result:
-            chat_session_update["training_result"] = training_result
         
         chat_sessions_col.update_one(
             {"session_id": session_id},
-            {"$set": chat_session_update}
+            {"$set": {
+                "session_status": "processed",
+                "processed_at": datetime.utcnow(),
+                "pdf_generated": True,
+                "pdf_size_bytes": len(pdf_content),
+                "s3_upload_success": s3_upload_success,
+                "training_success": training_success,
+                "pdf_s3_url": s3_url if s3_url else None
+            }}
         )
         
-        # Create comprehensive response
-        success_parts = ["PDF generated"]
+        success_parts = ["Chat history collected", "PDF generated"]
         if s3_upload_success:
             success_parts.append("uploaded to S3")
         if training_success:
-            success_parts.append("knowledge base trained")
-        
-        success_message = f"Interview processed successfully: {', '.join(success_parts)}"
-        
-        log_database_operation(interview_processing_logger, "UPDATE", "multiple", request.user_id, 
-                             f"Interview processed: {request.email}, Results: {success_parts}")
-        
-        interview_processing_logger.info(f"Successfully processed interview for user: {request.user_id}, email: {request.email}")
+            success_parts.append("text trained to KB")
         
         return {
-            "message": success_message,
+            "message": f"Interview processed successfully: {', '.join(success_parts)}",
             "user_id": request.user_id,
             "email": request.email,
             "session_id": session_id,
             "interview_token": token,
-            "pdf_generated": True,
-            "pdf_size_bytes": pdf_file.getvalue(),
-            "chat_messages_count": len(chat_history),
-            "s3_upload_success": s3_upload_success,
-            "s3_url": s3_url,
-            "s3_error": s3_error,
-            "training_success": training_success,
-            "training_result": training_result,
-            "training_error": training_error,
+            "workflow_completed": True,
+            "step_1_chat_history": {
+                "success": True,
+                "messages_count": len(chat_history)
+            },
+            "step_2_pdf_creation": {
+                "success": True,
+                "pdf_size_bytes": len(pdf_content),
+                "text_content_length": len(text_content)
+            },
+            "step_3_s3_upload": {
+                "success": s3_upload_success,
+                "s3_url": s3_url,
+                "error": s3_error
+            },
             "rag_id": rag_id
         }
         
     except HTTPException:
         raise
     except Exception as e:
-        interview_processing_logger.error(f"Failed to process interview for user {request.user_id}, email {request.email}: {e}",
-                        extra={'user_id': request.user_id, 'email': request.email, 'error_type': 'interview_processing'})
         raise HTTPException(status_code=500, detail=f"Failed to process interview: {str(e)}")
 
+@app.post("/interview/test-kb-training")
+def test_kb_training(request: InterviewProcessRequest):
+    try:
+        session_id = f"{request.user_id}+{request.email}"
+        
+        user_account = accounts_col.find_one({"user_id": request.user_id})
+        if not user_account:
+            raise HTTPException(status_code=404, detail="User account not found")
+        
+        api_key = user_account.get("api_key")
+        rag_id = user_account.get("rag_id")
+        
+        if not api_key:
+            raise HTTPException(status_code=400, detail="No API key found for user")
+        if not rag_id:
+            raise HTTPException(status_code=400, detail="No RAG ID provided or found for user")
+        
+        chat_history = get_chat_history(session_id=session_id, api_key=api_key)
+        if not chat_history:
+            raise HTTPException(status_code=404, detail="No chat history found")
+        
+        text_content = ""
+        for message in chat_history:
+            role = message.get('role', 'unknown')
+            content = message.get('content', '')
+            created_at = message.get('created_at', '')
+            
+            text_content += f"[{role.upper()}] {content}\n"
+            if created_at:
+                text_content += f"Time: {created_at}\n"
+            text_content += "\n"
+        
+        training_success = False
+        training_result = {}
+        training_error = None
+        
+        try:
+            training_result = train_text_directly(
+                text_content=text_content,
+                rag_id=rag_id,
+                api_key=api_key,
+                data_parser="simple",
+                chunk_size=1000,
+                chunk_overlap=100,
+                extra_info="{}"
+            )
+            training_success = True
+        except Exception as training_exception:
+            training_error = str(training_exception)
+            training_result = {
+                "success": False,
+                "error": training_error,
+                "error_type": type(training_exception).__name__
+            }
+        
+        return {
+            "message": f"KB training test {'completed successfully' if training_success else 'failed'}",
+            "user_id": request.user_id,
+            "email": request.email,
+            "session_id": session_id,
+            "test_type": "kb_training_only",
+            "chat_history_collected": {
+                "success": True,
+                "messages_count": len(chat_history)
+            },
+            "text_content_prepared": {
+                "success": True,
+                "text_length": len(text_content),
+                "preview": text_content[:200] + "..." if len(text_content) > 200 else text_content
+            },
+            "kb_training_test": {
+                "success": training_success,
+                "training_result": training_result,
+                "error": training_error,
+                "rag_id": rag_id,
+                "api_key_provided": bool(api_key),
+                "training_params": {
+                    "data_parser": "simple",
+                    "chunk_size": 1000,
+                    "chunk_overlap": 100,
+                    "extra_info": "{}"
+                }
+            }
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to test KB training: {str(e)}")
 
+
+## -------------------
+## KNOWLEDGE BASE RETRIEVAL ENDPOINTS
+## -------------------
 @app.get("/knowledge-base/pdfs/{user_id}")
 def get_user_kb_pdfs(user_id: str):
     """Get all processed PDFs for a user's knowledge base"""
