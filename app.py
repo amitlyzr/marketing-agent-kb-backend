@@ -17,18 +17,19 @@ from pymongo import MongoClient
 from dotenv import load_dotenv
 from logger_config import (
     api_logger, 
+    interview_processing_logger,
     log_api_request, 
     log_api_response, 
     log_database_operation,
     log_email_operation
 )
 from pdf_utils import (
+    create_simple_pdf_from_text,
     get_chat_history,
     create_lyzr_agent,
     create_lyzr_rag_kb,
     link_agent_with_rag,
     upload_pdf_to_s3,
-    generate_pdf_from_chat_history,
     train_pdf_directly,
 )
 load_dotenv()
@@ -1380,20 +1381,17 @@ def complete_interview_by_session(session_id: str):
 def process_interview_completion(request: InterviewProcessRequest):
     """Process completed interview: generate PDF, upload to S3, and train KB directly"""
     try:
-        api_logger.info(f"Processing interview completion for user: {request.user_id}, email: {request.email}")
+        interview_processing_logger.info(f"Processing interview completion for user: {request.user_id}, email: {request.email}")
         
-        # Check if interview exists and is completed
         token = f"{request.user_id}-{request.email}"
         interview = interviews_col.find_one({"token": token})
         
         if not interview:
-            api_logger.warning(f"Interview not found for processing: {token}")
+            interview_processing_logger.warning(f"Interview not found for processing: {token}")
             raise HTTPException(status_code=404, detail="Interview not found")
         
-        # Generate session_id using the new format (user_id+email)
         session_id = f"{request.user_id}+{request.email}"
         
-        # Get user account for API key
         user_account = accounts_col.find_one({"user_id": request.user_id})
         api_key = user_account.get("api_key") if user_account else None
         rag_id = request.rag_id or (user_account.get("rag_id") if user_account else None)
@@ -1404,57 +1402,57 @@ def process_interview_completion(request: InterviewProcessRequest):
         if not rag_id:
             raise HTTPException(status_code=400, detail="No RAG ID provided or found for user")
         
-        # STEP 1: Get chat history (once)
-        api_logger.info(f"Step 1: Getting chat history for session: {session_id}")
-        chat_history = get_chat_history(session_id, api_key)
+        interview_processing_logger.info(f"Step 1: Getting chat history for session: {session_id}")
+        # chat_history = get_chat_history(session_id, api_key)
+        chat_history = get_chat_history(session_id=session_id, api_key=api_key)
+        chat_history = json.dumps(chat_history)
         
         if not chat_history:
-            api_logger.warning(f"No chat history found for session: {session_id}")
+            interview_processing_logger.warning(f"No chat history found for session: {session_id}")
             raise HTTPException(status_code=404, detail="No chat history found")
-        
-        api_logger.info(f"Retrieved {len(chat_history)} messages from chat history")
-        
-        # STEP 2: Generate PDF (once)
-        api_logger.info(f"Step 2: Generating PDF from chat history")
-        pdf_content = generate_pdf_from_chat_history(chat_history, request.user_id, request.email)
-        api_logger.info(f"PDF generated successfully, size: {len(pdf_content)} bytes")
-        
-        # STEP 3: Upload to S3
+
+        interview_processing_logger.info(f"Retrieved {len(chat_history)} messages from chat history")
+
+        interview_processing_logger.info(f"Step 2: Generating PDF from chat history")
+        pdf_file = create_simple_pdf_from_text(json.dumps(chat_history))
+        interview_processing_logger.info(f"PDF generated successfully, size: {len(pdf_file.getvalue())} bytes")
+
         s3_upload_success = False
         s3_url = None
         s3_error = None
         
         try:
-            api_logger.info(f"Step 3: Uploading PDF to S3 for session: {session_id}")
-            s3_url = upload_pdf_to_s3(pdf_content, request.user_id, request.email, session_id)
+            interview_processing_logger.info(f"Step 3: Uploading PDF to S3 for session: {session_id}")
+            s3_url = upload_pdf_to_s3(pdf_file, request.user_id, request.email, session_id)
             s3_upload_success = True
-            api_logger.info(f"Successfully uploaded PDF to S3 for session: {session_id}")
+            interview_processing_logger.info(f"Successfully uploaded PDF to S3 for session: {session_id}")
         except Exception as s3_exception:
-            api_logger.warning(f"S3 upload failed for session {session_id}: {s3_exception}")
+            interview_processing_logger.warning(f"S3 upload failed for session {session_id}: {s3_exception}")
             s3_error = str(s3_exception)
-        
-        # STEP 4: Train KB directly (no HTTP call)
+
         training_success = False
         training_result = {}
         training_error = None
         
         try:
-            api_logger.info(f"Step 4: Training knowledge base directly with PDF")
+            interview_processing_logger.info(f"Step 4: Training knowledge base directly with PDF")
             training_result = train_pdf_directly(
-                pdf_content=pdf_content,
+                pdf_file=io.BytesIO(pdf_file.getvalue()),
                 rag_id=rag_id,
                 api_key=api_key,
                 data_parser="llmsherpa",
                 chunk_size=1000,
                 chunk_overlap=100,
-                extra_info="{}"
+                extra_info={}
             )
-            
-            training_success = "successfully" in training_result.get("message", "").lower()
-            api_logger.info(f"Knowledge base training completed, success: {training_success}")
+
+            print(training_result)
+
+            interview_processing_logger.info(f"Knowledge base training completed, success")
+            training_success = True
             
         except Exception as training_exception:
-            api_logger.error(f"KB training failed for session {session_id}: {training_exception}")
+            interview_processing_logger.error(f"KB training failed for session {session_id}: {training_exception}")
             training_error = str(training_exception)
             training_result = {
                 "success": False,
@@ -1468,7 +1466,7 @@ def process_interview_completion(request: InterviewProcessRequest):
             "processed_at": datetime.utcnow(),
             "session_id": session_id,
             "pdf_generated": True,
-            "pdf_size_bytes": len(pdf_content),
+            "pdf_size_bytes": pdf_file.getvalue(),
             "s3_upload_success": s3_upload_success,
             "training_success": training_success,
             "rag_id": rag_id,
@@ -1497,7 +1495,7 @@ def process_interview_completion(request: InterviewProcessRequest):
             "session_status": "processed",
             "processed_at": datetime.utcnow(),
             "pdf_generated": True,
-            "pdf_size_bytes": len(pdf_content),
+            "pdf_size_bytes": pdf_file.getvalue(),
             "s3_upload_success": s3_upload_success,
             "training_success": training_success
         }
@@ -1521,10 +1519,10 @@ def process_interview_completion(request: InterviewProcessRequest):
         
         success_message = f"Interview processed successfully: {', '.join(success_parts)}"
         
-        log_database_operation(api_logger, "UPDATE", "multiple", request.user_id, 
+        log_database_operation(interview_processing_logger, "UPDATE", "multiple", request.user_id, 
                              f"Interview processed: {request.email}, Results: {success_parts}")
         
-        api_logger.info(f"Successfully processed interview for user: {request.user_id}, email: {request.email}")
+        interview_processing_logger.info(f"Successfully processed interview for user: {request.user_id}, email: {request.email}")
         
         return {
             "message": success_message,
@@ -1533,7 +1531,7 @@ def process_interview_completion(request: InterviewProcessRequest):
             "session_id": session_id,
             "interview_token": token,
             "pdf_generated": True,
-            "pdf_size_bytes": len(pdf_content),
+            "pdf_size_bytes": pdf_file.getvalue(),
             "chat_messages_count": len(chat_history),
             "s3_upload_success": s3_upload_success,
             "s3_url": s3_url,
@@ -1547,7 +1545,7 @@ def process_interview_completion(request: InterviewProcessRequest):
     except HTTPException:
         raise
     except Exception as e:
-        api_logger.error(f"Failed to process interview for user {request.user_id}, email {request.email}: {e}",
+        interview_processing_logger.error(f"Failed to process interview for user {request.user_id}, email {request.email}: {e}",
                         extra={'user_id': request.user_id, 'email': request.email, 'error_type': 'interview_processing'})
         raise HTTPException(status_code=500, detail=f"Failed to process interview: {str(e)}")
 

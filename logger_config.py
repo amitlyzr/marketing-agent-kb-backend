@@ -155,6 +155,59 @@ def setup_email_logger() -> logging.Logger:
     return setup_logger("marketing_agent.email", os.getenv("LOG_LEVEL", "INFO"))
 
 
+def setup_interview_processing_logger() -> logging.Logger:
+    """Setup logger specifically for interview processing operations"""
+    
+    # Create logs directory if it doesn't exist
+    logs_dir = Path("logs")
+    logs_dir.mkdir(exist_ok=True)
+    
+    # Create logger
+    logger = logging.getLogger("marketing_agent.interview_processing")
+    logger.setLevel(getattr(logging, os.getenv("LOG_LEVEL", "INFO").upper()))
+    
+    # Prevent duplicate handlers
+    if logger.handlers:
+        return logger
+    
+    # Console Handler with colored output
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setLevel(logging.INFO)
+    console_format = ColoredFormatter(
+        '%(asctime)s | %(levelname)-8s | INTERVIEW_PROCESSING | %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S'
+    )
+    console_handler.setFormatter(console_format)
+    
+    # Dedicated File Handler for interview processing (with rotation)
+    interview_file_handler = logging.handlers.RotatingFileHandler(
+        logs_dir / "interview_processing.log",
+        maxBytes=10*1024*1024,  # 10MB
+        backupCount=5,
+        encoding='utf-8'
+    )
+    interview_file_handler.setLevel(logging.DEBUG)
+    interview_file_format = StructuredFormatter()
+    interview_file_handler.setFormatter(interview_file_format)
+    
+    # Error File Handler for interview processing errors only
+    interview_error_handler = logging.handlers.RotatingFileHandler(
+        logs_dir / "interview_processing_errors.log",
+        maxBytes=5*1024*1024,  # 5MB
+        backupCount=3,
+        encoding='utf-8'
+    )
+    interview_error_handler.setLevel(logging.ERROR)
+    interview_error_handler.setFormatter(interview_file_format)
+    
+    # Add handlers to logger
+    logger.addHandler(console_handler)
+    logger.addHandler(interview_file_handler)
+    logger.addHandler(interview_error_handler)
+    
+    return logger
+
+
 def log_api_request(logger: logging.Logger, endpoint: str, method: str, user_id: str = None):
     """Helper function to log API requests - Only log errors"""
     pass  # Don't log every request
@@ -187,10 +240,24 @@ def log_scheduler_event(logger: logging.Logger, event: str, user_id: str = None,
         logger.info(f"Scheduler: {event} - {details}" if details else f"Scheduler: {event}")
 
 
+def log_interview_processing_step(logger: logging.Logger, step: str, user_id: str, email: str, details: str = None):
+    """Helper function to log interview processing steps"""
+    if details:
+        logger.info(f"Interview Processing [{step}] for {user_id}/{email}: {details}")
+    else:
+        logger.info(f"Interview Processing [{step}] for {user_id}/{email}")
+
+
+def log_interview_processing_error(logger: logging.Logger, step: str, user_id: str, email: str, error: str):
+    """Helper function to log interview processing errors"""
+    logger.error(f"Interview Processing [{step}] FAILED for {user_id}/{email}: {error}")
+
+
 # Global loggers for easy import
 api_logger = setup_api_logger()
 scheduler_logger = setup_scheduler_logger()
 email_logger = setup_email_logger()
+interview_processing_logger = setup_interview_processing_logger()
 
 # Log startup
 api_logger.info("Marketing Agent Application - Logging System Initialized")
