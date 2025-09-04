@@ -24,7 +24,8 @@ from pdf_utils import (
     link_agent_with_rag,
     upload_pdf_to_s3,
     train_text_directly,
-    generate_signed_url
+    generate_presigned_url,
+    categorize_chat_history
 )
 load_dotenv()
 
@@ -58,6 +59,7 @@ try:
     interviews_col = db.interviews
     email_contents_col = db.email_contents
     chat_sessions_col = db.chat_sessions
+    categorized_pdfs_col = db.categorized_pdfs
     
     # Test connection
     client.admin.command('ping')
@@ -163,6 +165,24 @@ class AccountUpdateRequest(BaseModel):
     chat_agent_id: Optional[str] = None
     agent_prompt: Optional[str] = None 
 
+class PDFCategory(BaseModel):
+    title: str
+    subheading: str
+    category: str
+
+class CategorizedPDF(BaseModel):
+    user_id: str
+    email: EmailStr
+    session_id: str
+    pdf_s3_url: str
+    title: str
+    subheading: str
+    category: str
+    type: str  # "chat_session" or "interview"
+    message_count: int = 0
+    kb_trained: bool = False
+    created_at: datetime
+    updated_at: datetime 
 
 
 # -----------------------------
@@ -1084,6 +1104,9 @@ async def send_interview_message_stream(chat_msg: ChatMessage):
                                 break
                             yield f"data: {data_content}\n\n"
                             await asyncio.sleep(0.01)  # Small delay for smooth streaming
+                
+                # Ensure we always send [DONE] at the end
+                yield f"data: [DONE]\n\n"
                         
             except Exception as e:
                 print(f"Interview streaming error: {e}")
@@ -1346,91 +1369,270 @@ def complete_interview_by_session(session_id: str):
 
 @app.post("/interview/process")
 def process_interview_completion(request: InterviewProcessRequest):
-    """Process completed interview: get chat history, generate PDF, and upload to S3 (NO KB training)"""
+    """Process completed interview: get chat history, categorize, generate PDF, and upload to S3 (NO KB training)"""
+    print("=" * 80)
+    print("STARTING INTERVIEW PROCESSING WORKFLOW")
+    print("=" * 80)
+    
     try:
         token = f"{request.user_id}-{request.email}"
         session_id = f"{request.user_id}+{request.email}"
         
+        print(f"🔧 INITIALIZATION:")
+        print(f"   - User ID: {request.user_id}")
+        print(f"   - Email: {request.email}")
+        print(f"   - Generated Token: {token}")
+        print(f"   - Generated Session ID: {session_id}")
+        
         # Get user account
+        print(f"\n🔍 STEP 0: RETRIEVING USER ACCOUNT")
+        print(f"   - Searching for user_id: {request.user_id}")
         user_account = accounts_col.find_one({"user_id": request.user_id})
         if not user_account:
+            print(f"   ❌ ERROR: User account not found for user_id: {request.user_id}")
             raise HTTPException(status_code=404, detail="User account not found")
+        
+        print(f"   ✅ User account found")
+        print(f"   - Account keys: {list(user_account.keys())}")
         
         api_key = user_account.get("api_key")
         if not api_key:
+            print(f"   ❌ ERROR: No API key found in user account")
             raise HTTPException(status_code=400, detail="No API key found for user")
         
+        print(f"   ✅ API key found: {api_key[:8]}...{api_key[-4:] if len(api_key) > 12 else '***'}")
+        
         # Step 1: Get chat history
-        print(f"Step 1: Getting chat history for session: {session_id}")
-        chat_history = get_chat_history(session_id=session_id, api_key=api_key)
-        if not chat_history:
-            raise HTTPException(status_code=404, detail="No chat history found")
+        print(f"\n📜 STEP 1: RETRIEVING CHAT HISTORY")
+        print(f"   - Session ID: {session_id}")
+        print(f"   - API Key: {api_key[:8]}...{api_key[-4:] if len(api_key) > 12 else '***'}")
+        print(f"   - Calling get_chat_history function...")
         
-        # Step 2: Generate PDF from chat history
-        print(f"Step 2: Generating PDF for session: {session_id}")
-        pdf_file = create_simple_pdf_from_text(json.dumps(chat_history, indent=2))
-        pdf_content = pdf_file.getvalue()
+        try:
+            chat_history = get_chat_history(session_id=session_id, api_key=api_key)
+            print(f"   - get_chat_history returned: {type(chat_history)}")
+            print(f"   - Chat history length: {len(chat_history) if chat_history else 0}")
+            
+            if not chat_history:
+                print(f"   ❌ ERROR: No chat history found for session: {session_id}")
+                raise HTTPException(status_code=404, detail="No chat history found")
+            
+            print(f"   ✅ Chat history retrieved successfully")
+            print(f"   - Total messages: {len(chat_history)}")
+            print(f"   - First few messages preview:")
+            for i, msg in enumerate(chat_history[:3]):
+                print(f"     [{i}] Type: {type(msg)}, Keys: {list(msg.keys()) if isinstance(msg, dict) else 'Not a dict'}")
+                if isinstance(msg, dict) and 'message' in msg:
+                    preview = msg['message'][:100] + "..." if len(msg['message']) > 100 else msg['message']
+                    print(f"         Message preview: {preview}")
+                    
+        except Exception as history_error:
+            print(f"   ❌ ERROR getting chat history: {history_error}")
+            print(f"   ❌ Error type: {type(history_error).__name__}")
+            print(f"   ❌ Error details: {str(history_error)}")
+            raise
         
-        # Step 3: Upload PDF to S3
+        # Step 2: Categorize chat history using AI agent
+        print(f"\n🤖 STEP 2: CATEGORIZING CHAT HISTORY")
+        print(f"   - Session ID: {session_id}")
+        print(f"   - Chat history messages count: {len(chat_history)}")
+        
+        categorization = {"title": "Conversation Summary", "subheading": "Processed conversation content", "category": "General Discussion"}
+        print(f"   - Default categorization prepared: {categorization}")
+        
+        try:
+            print(f"   - Calling categorize_chat_history function...")
+            categorization_result = categorize_chat_history(chat_history)
+            print(f"   - categorize_chat_history returned: {type(categorization_result)}")
+            print(f"   - Categorization result: {categorization_result}")
+            
+            if categorization_result and isinstance(categorization_result, dict):
+                categorization = categorization_result
+                print(f"   ✅ Categorization successful")
+                print(f"   - Title: {categorization.get('title', 'N/A')}")
+                print(f"   - Subheading: {categorization.get('subheading', 'N/A')}")
+                print(f"   - Category: {categorization.get('category', 'N/A')}")
+            else:
+                print(f"   ⚠️ WARNING: Invalid categorization result, using default")
+                
+        except Exception as cat_error:
+            print(f"   ❌ ERROR during categorization: {cat_error}")
+            print(f"   ❌ Error type: {type(cat_error).__name__}")
+            print(f"   ❌ Error details: {str(cat_error)}")
+            print(f"   - Using default categorization: {categorization}")
+        
+        # Step 3: Generate PDF from chat history
+        print(f"\n📄 STEP 3: GENERATING PDF")
+        print(f"   - Session ID: {session_id}")
+        print(f"   - Converting chat history to JSON...")
+        
+        try:
+            chat_history_json = json.dumps(chat_history, indent=2)
+            print(f"   - JSON conversion successful, length: {len(chat_history_json)} characters")
+            print(f"   - Calling create_simple_pdf_from_text function...")
+            
+            pdf_file = create_simple_pdf_from_text(chat_history_json)
+            pdf_content = pdf_file.getvalue()
+            
+            print(f"   ✅ PDF generation successful")
+            print(f"   - PDF content size: {len(pdf_content)} bytes")
+            print(f"   - PDF file type: {type(pdf_file)}")
+            
+        except Exception as pdf_error:
+            print(f"   ❌ ERROR generating PDF: {pdf_error}")
+            print(f"   ❌ Error type: {type(pdf_error).__name__}")
+            print(f"   ❌ Error details: {str(pdf_error)}")
+            raise
+        
+        # Step 4: Upload PDF to S3
+        print(f"\n☁️ STEP 4: UPLOADING PDF TO S3")
+        print(f"   - Session ID: {session_id}")
+        print(f"   - User ID: {request.user_id}")
+        print(f"   - Email: {request.email}")
+        print(f"   - PDF size: {len(pdf_content)} bytes")
+        
         s3_upload_success = False
         s3_url = None
         s3_error = None
         signed_url = None
         
         try:
-            print(f"Step 3: Uploading PDF to S3 for session: {session_id}")
+            print(f"   - Calling upload_pdf_to_s3 function...")
             upload_result = upload_pdf_to_s3(pdf_content, request.user_id, request.email, session_id)
-            s3_url = upload_result['s3_url']
-            signed_url = upload_result['signed_url']
-            s3_upload_success = True
-            print(f"Successfully uploaded PDF to S3: {s3_url}")
+            print(f"   - upload_pdf_to_s3 returned: {type(upload_result)}")
+            print(f"   - Upload result: {upload_result}")
+            
+            if isinstance(upload_result, dict):
+                s3_url = upload_result.get('s3_url')
+                signed_url = upload_result.get('signed_url')
+                s3_upload_success = True
+                print(f"   ✅ S3 upload successful")
+                print(f"   - S3 URL: {s3_url}")
+                print(f"   - Signed URL available: {'Yes' if signed_url else 'No'}")
+            else:
+                print(f"   ⚠️ WARNING: Unexpected upload result format: {upload_result}")
+                
         except Exception as s3_exception:
             s3_error = str(s3_exception)
-            print(f"S3 upload failed: {s3_error}")
+            print(f"   ❌ ERROR during S3 upload: {s3_error}")
+            print(f"   ❌ Error type: {type(s3_exception).__name__}")
+            print(f"   ❌ Error details: {str(s3_exception)}")
         
-        # Step 4: Update database records
-        print(f"Step 4: Updating database records for session: {session_id}")
+        # Step 5: Store categorized PDF information
+        print(f"\n💾 STEP 5: STORING CATEGORIZED PDF INFORMATION")
+        if s3_upload_success and s3_url:
+            print(f"   - S3 upload was successful, proceeding with database storage")
+            print(f"   - Session ID: {session_id}")
+            
+            categorized_pdf_data = {
+                "user_id": request.user_id,
+                "email": request.email,
+                "session_id": session_id,
+                "pdf_s3_url": s3_url,
+                "title": categorization["title"],
+                "subheading": categorization["subheading"], 
+                "category": categorization["category"],
+                "type": "interview",
+                "message_count": len(chat_history),
+                "kb_trained": False,
+                "created_at": datetime.utcnow(),
+                "updated_at": datetime.utcnow()
+            }
+            
+            print(f"   - Categorized PDF data prepared:")
+            for key, value in categorized_pdf_data.items():
+                print(f"     - {key}: {value}")
+            
+            try:
+                # Store in categorized PDFs collection
+                result = categorized_pdfs_col.insert_one(categorized_pdf_data)
+                print(f"   ✅ Categorized PDF stored successfully")
+                print(f"   - Inserted document ID: {result.inserted_id}")
+                print(f"   - Title: {categorization['title']}")
+                print(f"   - Category: {categorization['category']}")
+            except Exception as db_error:
+                print(f"   ❌ ERROR storing categorized PDF: {db_error}")
+                print(f"   ❌ Error type: {type(db_error).__name__}")
+                raise
+        else:
+            print(f"   ⚠️ SKIPPING: S3 upload failed, not storing categorized PDF info")
+            print(f"   - S3 upload success: {s3_upload_success}")
+            print(f"   - S3 URL: {s3_url}")
+        
+        # Step 6: Update database records
+        print(f"\n🗄️ STEP 6: UPDATING DATABASE RECORDS")
+        print(f"   - Session ID: {session_id}")
+        print(f"   - Token: {token}")
+        
         update_data = {
-            "status": "processed",
+            "status": "completed",
             "processed_at": datetime.utcnow(),
             "session_id": session_id,
             "pdf_generated": True,
             "pdf_size_bytes": len(pdf_content),
             "s3_upload_success": s3_upload_success,
-            "chat_messages_count": len(chat_history)
+            "chat_messages_count": len(chat_history),
+            "categorization": categorization
         }
+        
+        print(f"   - Update data prepared:")
+        for key, value in update_data.items():
+            print(f"     - {key}: {value}")
         
         if s3_url:
             update_data["pdf_s3_url"] = s3_url
+            print(f"   - Added S3 URL to update data: {s3_url}")
         if s3_error:
             update_data["s3_error"] = s3_error
+            print(f"   - Added S3 error to update data: {s3_error}")
         
         # Update interview record
-        interviews_col.update_one(
-            {"token": token},
-            {"$set": update_data},
-            upsert=True
-        )
+        print(f"   - Updating interview record with token: {token}")
+        try:
+            interview_result = interviews_col.update_one(
+                {"token": token},
+                {"$set": update_data},
+                upsert=True
+            )
+            print(f"   ✅ Interview record updated successfully")
+            print(f"   - Matched count: {interview_result.matched_count}")
+            print(f"   - Modified count: {interview_result.modified_count}")
+            print(f"   - Upserted ID: {interview_result.upserted_id}")
+        except Exception as interview_db_error:
+            print(f"   ❌ ERROR updating interview record: {interview_db_error}")
+            raise
         
         # Update chat session record
-        chat_sessions_col.update_one(
-            {"session_id": session_id},
-            {"$set": {
-                "session_status": "processed",
-                "processed_at": datetime.utcnow(),
-                "pdf_generated": True,
-                "pdf_size_bytes": len(pdf_content),
-                "s3_upload_success": s3_upload_success,
-                "pdf_s3_url": s3_url if s3_url else None
-            }}
-        )
+        print(f"   - Updating chat session record with session_id: {session_id}")
+        try:
+            session_result = chat_sessions_col.update_one(
+                {"session_id": session_id},
+                {"$set": {
+                    "session_status": "completed",
+                    "processed_at": datetime.utcnow(),
+                    "pdf_generated": True,
+                    "pdf_size_bytes": len(pdf_content),
+                    "s3_upload_success": s3_upload_success,
+                    "pdf_s3_url": s3_url if s3_url else None,
+                    "categorization": categorization
+                }}
+            )
+            print(f"   ✅ Chat session record updated successfully")
+            print(f"   - Matched count: {session_result.matched_count}")
+            print(f"   - Modified count: {session_result.modified_count}")
+        except Exception as session_db_error:
+            print(f"   ❌ ERROR updating chat session record: {session_db_error}")
+            raise
         
         # Build success message
-        success_parts = ["Chat history collected", "PDF generated"]
+        success_parts = ["Chat history collected", "Content categorized", "PDF generated"]
         if s3_upload_success:
             success_parts.append("uploaded to S3")
         
-        print(f"Interview processing completed for session: {session_id}")
+        print(f"\n🎉 WORKFLOW COMPLETED SUCCESSFULLY")
+        print(f"   - Session ID: {session_id}")
+        print(f"   - Success parts: {success_parts}")
+        print("=" * 80)
         
         return {
             "message": f"Interview processed successfully: {', '.join(success_parts)}",
@@ -1443,11 +1645,15 @@ def process_interview_completion(request: InterviewProcessRequest):
                 "success": True,
                 "messages_count": len(chat_history)
             },
-            "step_2_pdf_creation": {
+            "step_2_categorization": {
+                "success": True,
+                "categorization": categorization
+            },
+            "step_3_pdf_creation": {
                 "success": True,
                 "pdf_size_bytes": len(pdf_content)
             },
-            "step_3_s3_upload": {
+            "step_4_s3_upload": {
                 "success": s3_upload_success,
                 "s3_url": s3_url,
                 "signed_url": signed_url,
@@ -1457,8 +1663,15 @@ def process_interview_completion(request: InterviewProcessRequest):
         }
         
     except HTTPException:
+        print(f"\n❌ HTTP EXCEPTION OCCURRED")
+        print("=" * 80)
         raise
     except Exception as e:
+        print(f"\n❌ UNEXPECTED ERROR OCCURRED")
+        print(f"   - Error: {e}")
+        print(f"   - Error type: {type(e).__name__}")
+        print(f"   - Error details: {str(e)}")
+        print("=" * 80)
         print(f"Failed to process interview: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to process interview: {str(e)}")
 
@@ -1570,152 +1783,51 @@ def train_kb_with_session(request: InterviewProcessRequest):
 
 
 ## -------------------
-## KNOWLEDGE BASE RETRIEVAL ENDPOINTS
+## KNOWLEDGE BASE SIGNED URL ENDPOINTS
 ## -------------------
-def get_signed_pdf_url(pdf_info: Dict[str, Any]) -> Dict[str, Any]:
-    """Generate a signed URL for a PDF and update the PDF info with signed URL"""
+def get_signed_pdf_url(pdf_info: dict) -> dict:
+    """Generate signed URL for a PDF and return updated PDF info"""
     try:
-        if not pdf_info.get('pdf_url'):
-            return pdf_info
-            
-        # Extract S3 key from URL
-        s3_key = pdf_info['pdf_url'].replace(f'https://{S3_BUCKET}.s3.{AWS_REGION}.amazonaws.com/', '')
-        
-        # Generate signed URL (valid for 1 hour)
-        signed_url = generate_signed_url(s3_key)
-        
-        # Update the PDF info with signed URL
-        pdf_info['signed_url'] = signed_url
-        pdf_info['signed_url_expires_at'] = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
-        
+        if pdf_info.get("pdf_url"):
+            signed_url = generate_presigned_url(pdf_info["pdf_url"], 2)  # 2 hours expiration
+            if signed_url:
+                pdf_info["signed_url"] = signed_url
+                pdf_info["signed_url_expires_at"] = (datetime.now(timezone.utc) + timedelta(hours=2)).isoformat()
         return pdf_info
     except Exception as e:
-        print(f"Failed to generate signed URL for PDF: {e}")
-        # Return original info if signing fails
+        print(f"Failed to generate signed URL for PDF {pdf_info.get('id', 'unknown')}: {e}")
         return pdf_info
-
-@app.get("/knowledge-base/pdfs/{pdf_id}/signed-url")
-async def get_pdf_signed_url(pdf_id: str):
-    """Generate a signed URL for a specific PDF by ID"""
-    try:
-        print(f"Generating signed URL for PDF: {pdf_id}")
-        
-        # First try to find in chat sessions
-        pdf_info = chat_sessions_col.find_one({
-            "_id": ObjectId(pdf_id),
-            "pdf_s3_url": {"$exists": True, "$ne": None}
-        })
-        
-        # If not found in chat sessions, try interviews
-        if not pdf_info:
-            pdf_info = interviews_col.find_one({
-                "_id": ObjectId(pdf_id),
-                "pdf_s3_url": {"$exists": True, "$ne": None}
-            })
-        
-        if not pdf_info:
-            raise HTTPException(status_code=404, detail="PDF not found")
-            
-        # Prepare the PDF info in the expected format
-        pdf_data = {
-            "id": str(pdf_info.get("_id")),
-            "email": pdf_info.get("email", "Unknown"),
-            "session_id": pdf_info.get("session_id"),
-            "pdf_url": pdf_info.get("pdf_s3_url"),
-            "completed_at": pdf_info.get("processed_at", pdf_info.get("completed_at")),
-            "message_count": pdf_info.get("message_count", 0),
-            "type": "chat_session" if "chat_sessions_col" in str(pdf_info) else "interview",
-            "kb_trained": pdf_info.get("kb_trained", False)
-        }
-        
-        # Generate and return signed URL
-        result = await asyncio.to_thread(get_signed_pdf_url, pdf_data)
-        return {
-            "signed_url": result["signed_url"],
-            "expires_at": result["signed_url_expires_at"]
-        }
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        print(f"Failed to generate signed URL for PDF {pdf_id}: {e}")
-        raise HTTPException(status_code=500, detail="Failed to generate signed URL")
 
 @app.get("/knowledge-base/pdfs/{user_id}")
-async def get_user_kb_pdfs(user_id: str):
-    """Get all processed PDFs for a user's knowledge base with signed URLs"""
+async def get_user_pdfs(user_id: str):
+    """Get all PDFs for a user (fallback for non-categorized view)"""
     try:
-        print(f"Fetching KB PDFs for user: {user_id}")
-
-        # Fetch chat sessions with PDFs
-        chat_sessions = list(chat_sessions_col.find({
-            "user_id": user_id,
-            "pdf_s3_url": {"$exists": True, "$ne": None}
-        }))
-
-        # Fetch interviews with PDFs
-        interviews = list(interviews_col.find({
-            "user_id": user_id,
-            "pdf_s3_url": {"$exists": True, "$ne": None}
-        }))
+        print(f"Fetching all PDFs for user: {user_id}")
+        
+        # Find all categorized PDFs for the user
+        categorized_pdfs = list(categorized_pdfs_col.find({
+            "user_id": user_id
+        }).sort("created_at", -1))
         
         pdfs = []
-        seen_session_ids = set()
-        
-        # Process chat sessions
-        for session in chat_sessions:
-            email = session.get("email", "Unknown")
-            session_id = session.get("session_id")
-        
-            if email == "Unknown" or not email or not session_id:
-                continue
-
-            if session_id in seen_session_ids:
-                continue
-                
-            seen_session_ids.add(session_id)
+        for pdf_doc in categorized_pdfs:
             pdf_info = {
-                "id": str(session.get("_id")),
-                "email": email,
-                "session_id": session_id,
-                "pdf_url": session.get("pdf_s3_url"),
-                "completed_at": session.get("processed_at", session.get("completed_at")),
-                "message_count": session.get("message_count", 0),
-                "type": "chat_session",
-                "kb_trained": session.get("kb_trained", False)
+                "id": str(pdf_doc.get("_id")),
+                "email": pdf_doc.get("email"),
+                "session_id": pdf_doc.get("session_id"),
+                "pdf_url": pdf_doc.get("pdf_s3_url"),
+                "title": pdf_doc.get("title", "Untitled"),
+                "subheading": pdf_doc.get("subheading", ""),
+                "category": pdf_doc.get("category", "Uncategorized"),
+                "completed_at": pdf_doc.get("created_at"),
+                "message_count": pdf_doc.get("message_count", 0),
+                "type": pdf_doc.get("type", "unknown"),
+                "kb_trained": pdf_doc.get("kb_trained", False)
             }
             
             # Generate signed URL for the PDF
-            pdfs.append(await asyncio.to_thread(get_signed_pdf_url, pdf_info))
-
-        # Process interviews
-        for interview in interviews:
-            email = interview.get("email", "Unknown")
-            session_id = interview.get("session_id")
-            
-            if email == "Unknown" or not email or not session_id:
-                continue
-
-            if session_id in seen_session_ids:
-                continue
-                
-            seen_session_ids.add(session_id)
-            pdf_info = {
-                "id": str(interview.get("_id")),
-                "email": email,
-                "session_id": session_id,
-                "pdf_url": interview.get("pdf_s3_url"),
-                "completed_at": interview.get("processed_at", interview.get("completed_at")),
-                "message_count": interview.get("message_count", 0),
-                "type": "interview",
-                "kb_trained": interview.get("kb_trained", False)
-            }
-            
-            # Generate signed URL for the PDF
-            pdfs.append(await asyncio.to_thread(get_signed_pdf_url, pdf_info))
-        
-        # Sort by completion date (newest first)
-        pdfs.sort(key=lambda x: x.get("completed_at") or "", reverse=True)
+            signed_pdf = get_signed_pdf_url(pdf_info)
+            pdfs.append(signed_pdf)
         
         print(f"Found {len(pdfs)} PDFs for user {user_id}")
         
@@ -1726,5 +1838,200 @@ async def get_user_kb_pdfs(user_id: str):
         }
         
     except Exception as e:
-        print(f"Failed to fetch KB PDFs for user {user_id}: {e}")
+        print(f"Failed to fetch PDFs for user {user_id}: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to fetch PDFs: {str(e)}")
+
+## -------------------
+## CATEGORIZED KNOWLEDGE BASE ENDPOINTS
+## -------------------
+
+@app.get("/knowledge-base/categories/{user_id}")
+async def get_user_categories(user_id: str):
+    """Get all available categories for a user's PDFs"""
+    try:
+        print(f"Fetching categories for user: {user_id}")
+        
+        # Get unique categories from categorized PDFs
+        pipeline = [
+            {"$match": {"user_id": user_id}},
+            {"$group": {
+                "_id": "$category",
+                "count": {"$sum": 1},
+                "latest_pdf": {"$max": "$created_at"}
+            }},
+            {"$sort": {"count": -1}}
+        ]
+        
+        categories = list(categorized_pdfs_col.aggregate(pipeline))
+        
+        result = []
+        for cat in categories:
+            result.append({
+                "category": cat["_id"],
+                "count": cat["count"],
+                "latest_pdf": cat["latest_pdf"]
+            })
+        
+        print(f"Found {len(result)} categories for user {user_id}")
+        
+        return {
+            "user_id": user_id,
+            "categories": result
+        }
+        
+    except Exception as e:
+        print(f"Failed to fetch categories for user {user_id}: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to fetch categories: {str(e)}")
+
+@app.get("/knowledge-base/pdfs/{user_id}/category/{category}")
+async def get_pdfs_by_category(user_id: str, category: str):
+    """Get all PDFs for a specific category"""
+    try:
+        print(f"Fetching PDFs for user: {user_id}, category: {category}")
+        
+        # Decode URL-encoded category name
+        category = urllib.parse.unquote(category)
+        
+        # Find categorized PDFs
+        categorized_pdfs = list(categorized_pdfs_col.find({
+            "user_id": user_id,
+            "category": category
+        }).sort("created_at", -1))
+        
+        pdfs = []
+        for pdf_doc in categorized_pdfs:
+            pdf_info = {
+                "id": str(pdf_doc.get("_id")),
+                "email": pdf_doc.get("email"),
+                "session_id": pdf_doc.get("session_id"),
+                "pdf_url": pdf_doc.get("pdf_s3_url"),
+                "title": pdf_doc.get("title", "Untitled"),
+                "subheading": pdf_doc.get("subheading", ""),
+                "category": pdf_doc.get("category"),
+                "completed_at": pdf_doc.get("created_at"),
+                "message_count": pdf_doc.get("message_count", 0),
+                "type": pdf_doc.get("type", "unknown"),
+                "kb_trained": pdf_doc.get("kb_trained", False)
+            }
+            
+            # Generate signed URL for the PDF
+            pdfs.append(get_signed_pdf_url(pdf_info))
+        
+        print(f"Found {len(pdfs)} PDFs in category '{category}' for user {user_id}")
+        
+        return {
+            "user_id": user_id,
+            "category": category,
+            "pdf_count": len(pdfs),
+            "pdfs": pdfs
+        }
+        
+    except Exception as e:
+        print(f"Failed to fetch PDFs for category {category}, user {user_id}: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to fetch PDFs: {str(e)}")
+
+@app.get("/knowledge-base/pdfs-categorized/{user_id}")
+async def get_user_categorized_pdfs(user_id: str):
+    """Get all categorized PDFs for a user organized by category"""
+    try:
+        print(f"Fetching categorized PDFs for user: {user_id}")
+        
+        # Find all categorized PDFs for the user
+        categorized_pdfs = list(categorized_pdfs_col.find({
+            "user_id": user_id
+        }).sort("created_at", -1))
+        
+        # Group by category
+        categories = {}
+        total_pdfs = 0
+        
+        for pdf_doc in categorized_pdfs:
+            category = pdf_doc.get("category", "Uncategorized")
+            
+            if category not in categories:
+                categories[category] = []
+            
+            pdf_info = {
+                "id": str(pdf_doc.get("_id")),
+                "email": pdf_doc.get("email"),
+                "session_id": pdf_doc.get("session_id"),
+                "pdf_url": pdf_doc.get("pdf_s3_url"),
+                "title": pdf_doc.get("title", "Untitled"),
+                "subheading": pdf_doc.get("subheading", ""),
+                "category": category,
+                "completed_at": pdf_doc.get("created_at"),
+                "message_count": pdf_doc.get("message_count", 0),
+                "type": pdf_doc.get("type", "unknown"),
+                "kb_trained": pdf_doc.get("kb_trained", False)
+            }
+            
+            # Generate signed URL for the PDF
+            signed_pdf = get_signed_pdf_url(pdf_info)
+            categories[category].append(signed_pdf)
+            total_pdfs += 1
+        
+        print(f"Found {total_pdfs} categorized PDFs in {len(categories)} categories for user {user_id}")
+        
+        return {
+            "user_id": user_id,
+            "total_pdfs": total_pdfs,
+            "categories": categories
+        }
+        
+    except Exception as e:
+        print(f"Failed to fetch categorized PDFs for user {user_id}: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to fetch categorized PDFs: {str(e)}")
+
+## -------------------
+## PRESIGNED URL ENDPOINT
+## -------------------
+
+@app.get("/s3/presigned-url")
+def get_presigned_url(s3_url: str, expiration_hours: int = 1):
+    """
+    Generate a presigned URL for an S3 object
+    
+    Args:
+        s3_url: The S3 URL to generate a presigned URL for
+        expiration_hours: Hours until the presigned URL expires (default: 1)
+    
+    Returns:
+        dict: Contains the presigned URL or error message
+    """
+    try:
+        print(f"Generating presigned URL for: {s3_url}")
+        print(f"Expiration hours: {expiration_hours}")
+        
+        # Validate expiration_hours
+        if expiration_hours < 1 or expiration_hours > 24:
+            raise HTTPException(
+                status_code=400, 
+                detail="Expiration hours must be between 1 and 24"
+            )
+        
+        # Generate presigned URL
+        presigned_url = generate_presigned_url(s3_url, expiration_hours)
+        
+        if presigned_url is None:
+            raise HTTPException(
+                status_code=400,
+                detail="Failed to generate presigned URL. Please check if the S3 URL is valid."
+            )
+        
+        print(f"Presigned URL generated successfully")
+        
+        return {
+            "presigned_url": presigned_url,
+            "original_s3_url": s3_url,
+            "expires_in_hours": expiration_hours,
+            "expires_at": (datetime.now(timezone.utc) + timedelta(hours=expiration_hours)).isoformat()
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"ERROR: Failed to generate presigned URL for {s3_url}: {e}")
+        raise HTTPException(
+            status_code=500, 
+            detail=f"Internal server error while generating presigned URL: {str(e)}"
+        )

@@ -1,6 +1,7 @@
 import os
 import io
 import json
+from urllib.parse import urlparse
 import boto3
 import requests
 import tempfile
@@ -9,7 +10,7 @@ from datetime import datetime, timezone
 from reportlab.lib.pagesizes import letter
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-from reportlab.lib.enums import TA_LEFT, TA_RIGHT
+from reportlab.lib.enums import TA_LEFT
 from typing import List, Dict
 import random
 import string
@@ -30,6 +31,89 @@ LYZR_TRAIN_TXT_URL = "https://rag-prod.studio.lyzr.ai/v3/train/txt/"
 LYZR_CREATE_AGENT_URL = "https://agent-prod.studio.lyzr.ai/v3/agents/template/single-task"
 LYZR_CREATE_RAG_URL = "https://rag-prod.studio.lyzr.ai/v3/rag/"
 LYZR_UPDATE_AGENT_URL = "https://agent-prod.studio.lyzr.ai/v3/agents/template/single-task/{}"
+LYZR_CHAT_API_URL = "https://agent-prod.studio.lyzr.ai/v3/inference/chat/"
+
+LYZR_ONLY_FOR_CATEGORY_API_KEY = os.getenv("LYZR_API_KEY");
+LYZR_CATEGORY_AGENT_ID = os.getenv("LYZR_CATEGORY_AGENT_ID");
+
+def categorize_chat_history(chat_history: List[Dict]) -> Dict:
+    """
+    Categorize chat history using AI agent to generate title, subheading, and category
+    
+    Args:
+        chat_history: List of chat messages
+        agent_id: Agent ID for categorization
+        api_key: Lyzr API key
+        
+    Returns:
+        Dict containing title, subheading, and category
+    """
+    try:
+        lyzr_key = LYZR_ONLY_FOR_CATEGORY_API_KEY
+        agent_id = LYZR_CATEGORY_AGENT_ID
+        
+        if not lyzr_key:
+            raise ValueError("No Lyzr API key provided")
+        
+        headers = {
+            'accept': 'application/json',
+            'content-type': 'application/json',
+            'x-api-key': lyzr_key
+        }
+        
+        # Generate a unique session ID for this categorization request
+        session_id = f"categorization_{int(time.time())}_{random.randint(1000, 9999)}"
+        
+        data = {
+            'user_id': 'default_user',
+            'system_prompt_variables': {},
+            'agent_id': agent_id,
+            'session_id': session_id,
+            'message': chat_history
+        }
+        
+        print(f"Sending categorization request to Lyzr API with agent: {agent_id}")
+        response = requests.post(LYZR_CHAT_API_URL, headers=headers, json=data)
+        response.raise_for_status()
+        
+        result = response.json()
+        agent_response = result.get('agent_response', '').strip()
+        
+        print(f"Categorization response: {agent_response}")
+        
+        try:
+            start_idx = agent_response.find('{')
+            end_idx = agent_response.rfind('}') + 1
+            if start_idx != -1 and end_idx > start_idx:
+                json_str = agent_response[start_idx:end_idx]
+                category_data = json.loads(json_str)
+                
+                # Validate required fields
+                required_fields = ['title', 'subheading', 'category']
+                if all(field in category_data for field in required_fields):
+                    return category_data
+                else:
+                    print(f"Missing required fields in categorization response: {category_data}")
+                    
+        except json.JSONDecodeError as e:
+            print(f"Failed to parse JSON from categorization response: {e}")
+        
+        # Fallback categorization if parsing fails
+        print("Using fallback categorization")
+        return {
+            "title": "Conversation Summary",
+            "subheading": "Processed conversation content",
+            "category": "General Discussion"
+        }
+        
+    except Exception as e:
+        print(f"ERROR: Failed to categorize chat history: {e}")
+        # Return default categorization on error
+        return {
+            "title": "Conversation Summary", 
+            "subheading": "Processed conversation content",
+            "category": "General Discussion"
+        }
 
 def wait_between_operations(seconds: float = 2.0):
     time.sleep(seconds)
@@ -208,14 +292,12 @@ def upload_pdf_to_s3(pdf_content: bytes, user_id: str, email: str, session_id: s
         
         # Generate S3 URL and signed URL
         s3_url = f"https://{S3_BUCKET}.s3.{AWS_REGION}.amazonaws.com/{s3_key}"
-        signed_url = generate_signed_url(s3_key)
         
         print(f"PDF uploaded to S3: {s3_url}")
         print(f"Generated signed URL (expires in 1 hour)")
         
         return {
             's3_url': s3_url,
-            'signed_url': signed_url,
             'signed_url_expires_at': (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
         }
         
@@ -638,49 +720,38 @@ def train_text_directly(
         print(f"ERROR: Error details: {str(e)}")
         raise
 
-def generate_signed_url(s3_key: str, expiration: int = 3600) -> str:
+def generate_presigned_url(s3_url, expiration_hours=1):
     """
-    Generate a signed URL for an S3 object that expires after the specified time.
+    Generate presigned URL from S3 URL stored in database.
     
     Args:
-        s3_key: The S3 object key
-        expiration: Time in seconds until the URL expires (default: 1 hour)
-        
+        s3_url (str): S3 URL from database
+        expiration_hours (int): Hours until URL expires
+    
     Returns:
-        str: A signed URL that provides temporary access to the S3 object
+        str: Presigned URL or None if error
     """
     try:
-        s3_client = get_s3_client()
+        parsed = urlparse(s3_url)
+        object_key = parsed.path.lstrip('/')
         
-        # Generate the signed URL
-        signed_url = s3_client.generate_presigned_url(
-            'get_object',
-            Params={
-                'Bucket': S3_BUCKET,
-                'Key': s3_key
-            },
-            ExpiresIn=expiration
+        s3_client = boto3.client(
+            's3',
+            aws_access_key_id=AWS_ACCESS_KEY_ID,
+            aws_secret_access_key=AWS_SECRET_ACCESS_KEY,
+            region_name=AWS_REGION
         )
         
-        print(f"Generated signed URL for {s3_key} (expires in {expiration} seconds)")
-        return signed_url
+        presigned_url = s3_client.generate_presigned_url(
+            'get_object',
+            Params={
+                'Bucket': os.getenv('AWS_S3_BUCKET', 'lyzr-marketplace-s3'),
+                'Key': object_key
+            },
+            ExpiresIn=expiration_hours * 3600
+        )
         
-    except Exception as e:
-        print(f"ERROR: Failed to generate signed URL for {s3_key}: {e}")
-        raise
-
-def get_s3_key_from_url(s3_url: str) -> str:
-    try:
-        # Handle both virtual-hosted and path-style URLs
-        if f's3.{AWS_REGION}.amazonaws.com' in s3_url:
-            # Virtual-hosted style: https://bucket.s3.region.amazonaws.com/key
-            key = s3_url.split(f's3.{AWS_REGION}.amazonaws.com/')[-1]
-            key = key.split('?')[0]  # Remove query parameters if any
-        else:
-            # Path style: https://s3.region.amazonaws.com/bucket/key
-            key = s3_url.split(f's3.{AWS_REGION}.amazonaws.com/{S3_BUCKET}/')[-1]
+        return presigned_url
         
-        return key
-    except Exception as e:
-        print(f"ERROR: Failed to extract S3 key from URL {s3_url}: {e}")
-        raise
+    except:
+        return None
