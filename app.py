@@ -16,6 +16,7 @@ from pymongo import MongoClient
 from bson import ObjectId
 
 from dotenv import load_dotenv
+from prompts import INTERVIEW_AGENT_PROMPT, CHAT_AGENT_PROMPT
 from pdf_utils import (
     create_simple_pdf_from_text,
     get_chat_history,
@@ -78,7 +79,6 @@ class Account(BaseModel):
     agent_id: Optional[str] = None  # Interview agent ID
     rag_id: Optional[str] = None    # Knowledge base ID
     chat_agent_id: Optional[str] = None  # Chat agent ID (linked with KB)
-    agent_prompt: Optional[str] = None
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
 
@@ -147,14 +147,12 @@ class InterviewProcessRequest(BaseModel):
 
 class AgentCreateRequest(BaseModel):
     user_id: str
-    prompt: str
     name: str = "Interview Agent"
     description: str = "AI agent for conducting interviews"
     token: str  # Lyzr API token from frontend
 
 class ChatAgentCreateRequest(BaseModel):
     user_id: str
-    prompt: str
     name: str = "Chat Agent"
     description: str = "AI chat agent with knowledge base access"
     token: str  # Lyzr API token from frontend
@@ -162,8 +160,7 @@ class ChatAgentCreateRequest(BaseModel):
 class AccountUpdateRequest(BaseModel):
     agent_id: Optional[str] = None
     rag_id: Optional[str] = None
-    chat_agent_id: Optional[str] = None
-    agent_prompt: Optional[str] = None 
+    chat_agent_id: Optional[str] = None 
 
 class PDFCategory(BaseModel):
     title: str
@@ -198,9 +195,14 @@ def create_account(account: Account):
         if existing:
             return {"message": "Account already exists", "user_id": account.user_id}
         
-        accounts_col.insert_one(account.dict())
+        # Set created_at and updated_at timestamps
+        account_data = account.dict()
+        account_data["created_at"] = datetime.now(timezone.utc)
+        account_data["updated_at"] = datetime.now(timezone.utc)
+        
+        accounts_col.insert_one(account_data)
         print(f"Account created: {account.user_id}")
-        return account
+        return account_data
         
     except Exception as e:
         print(f"Failed to create account {account.user_id}: {e}")
@@ -257,13 +259,14 @@ def create_agent_with_kb(request: AgentCreateRequest):
     try:
         print(f"Creating interview agent and KB for user: {request.user_id}")
         
-        sanitized_prompt = request.prompt.replace('\r', '').replace('\t', ' ').replace('\n', ' ').strip()
+        # Use the predefined interview agent system prompt
+        system_prompt = INTERVIEW_AGENT_PROMPT
 
         # 1. Create the interview agent
         print(f"Step 1: Creating interview agent with name: {request.name}")
         agent_response = create_lyzr_agent(
             name=request.name,
-            prompt=sanitized_prompt,
+            system_prompt=system_prompt,
             description=request.description,
             api_key=request.token
         )
@@ -292,7 +295,6 @@ def create_agent_with_kb(request: AgentCreateRequest):
         update_data = {
             "agent_id": agent_id,
             "rag_id": rag_id,
-            "agent_prompt": request.prompt,
             "updated_at": datetime.now(timezone.utc)
         }
         
@@ -337,13 +339,14 @@ def create_chat_agent_with_kb_link(request: ChatAgentCreateRequest):
         if not rag_id:
             raise HTTPException(status_code=400, detail="No knowledge base found. Please create an interview agent first.")
         
-        sanitized_prompt = request.prompt.replace('\r', '').replace('\t', ' ').replace('\n', ' ').strip()
+        # Use the predefined chat agent system prompt
+        system_prompt = CHAT_AGENT_PROMPT
 
         # 1. Create the chat agent
         print(f"Step 1: Creating chat agent with name: {request.name}")
         agent_response = create_lyzr_agent(
             name=request.name,
-            prompt=sanitized_prompt,
+            system_prompt=system_prompt,
             description=request.description,
             api_key=request.token
         )
@@ -360,7 +363,7 @@ def create_chat_agent_with_kb_link(request: ChatAgentCreateRequest):
             agent_id=chat_agent_id,
             rag_id=rag_id,
             agent_name=request.name,
-            agent_prompt=request.prompt,
+            agent_system_prompt=system_prompt,
             rag_name=f"{request.name} Knowledge Base",
             api_key=request.token
         )

@@ -1,23 +1,23 @@
 import os
 import io
 import json
-from urllib.parse import urlparse
 import boto3
 import requests
-import tempfile
 import time
-from datetime import datetime, timezone
+import random
+import json
+import string
+
+from urllib.parse import urlparse
 from reportlab.lib.pagesizes import letter
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.enums import TA_LEFT
 from typing import List, Dict
-import random
-import string
-import json
 from datetime import datetime, timedelta
-from dotenv import load_dotenv
+from datetime import datetime, timezone
 
+from dotenv import load_dotenv
 load_dotenv()
 
 S3_BUCKET = os.getenv("AWS_S3_BUCKET")
@@ -410,13 +410,13 @@ def send_chat_message(user_id: str, agent_id: str, session_id: str, message: str
         print(f"ERROR: Failed to send chat message: {e}")
         raise
 
-def create_lyzr_agent(name: str, prompt: str, description: str = "AI Interview Agent", api_key: str = None) -> Dict:
+def create_lyzr_agent(name: str, system_prompt: str, description: str = "AI Interview Agent", api_key: str = None) -> Dict:
     """
     Create a new Lyzr agent
     
     Args:
         name: Agent name
-        prompt: Agent system prompt/instructions
+        system_prompt: Agent system prompt/instructions
         description: Agent description
         api_key: Lyzr API key (if not provided, uses environment variable)
         
@@ -439,7 +439,7 @@ def create_lyzr_agent(name: str, prompt: str, description: str = "AI Interview A
             "description": description,
             "agent_role": "You are an Expert Interview Assistant.",
             "agent_goal": "",
-            "agent_instructions": prompt,
+            "agent_instructions": system_prompt,
             "examples": None,
             "tool": "",
             "tool_usage_description": "{}",
@@ -483,7 +483,6 @@ def create_lyzr_agent(name: str, prompt: str, description: str = "AI Interview A
 
 def create_lyzr_rag_kb(name: str = "Interview Knowledge Base", api_key: str = None) -> Dict:
     try:
-        # Use provided api_key or fall back to environment variable
         lyzr_key = api_key
         if not lyzr_key:
             raise ValueError("No Lyzr API key provided")
@@ -536,7 +535,7 @@ def create_lyzr_rag_kb(name: str = "Interview Knowledge Base", api_key: str = No
         print(f"ERROR: Failed to create Lyzr RAG KB: {e}")
         raise
 
-def link_agent_with_rag(agent_id: str, rag_id: str, agent_name: str, agent_prompt: str, rag_name: str = "Interview Knowledge Base", api_key: str = None) -> Dict:
+def link_agent_with_rag(agent_id: str, rag_id: str, agent_name: str, agent_system_prompt: str, rag_name: str = "Interview Knowledge Base", api_key: str = None) -> Dict:
     """
     Link an agent with a RAG knowledge base by updating the agent configuration
     
@@ -544,7 +543,7 @@ def link_agent_with_rag(agent_id: str, rag_id: str, agent_name: str, agent_promp
         agent_id: Agent ID
         rag_id: RAG knowledge base ID
         agent_name: Agent name
-        agent_prompt: Agent prompt/instructions
+        agent_system_prompt: Agent system prompt/instructions
         rag_name: RAG knowledge base name
         api_key: Lyzr API key (if not provided, uses environment variable)
         
@@ -566,10 +565,10 @@ def link_agent_with_rag(agent_id: str, rag_id: str, agent_name: str, agent_promp
         
         data = {
             "name": agent_name,
-            "description": f"AI Interview Agent with knowledge base integration",
+            "description": f"AI Chat Agent with knowledge base integration",
             "agent_role": "You are an Expert in Knowledge Base Retrieval.",
             "agent_goal": "",
-            "agent_instructions": agent_prompt,
+            "agent_instructions": agent_system_prompt,
             "examples": None,
             "tool": "",
             "tool_usage_description": "{}",
