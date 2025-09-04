@@ -2,7 +2,7 @@ from fastapi import FastAPI, HTTPException, UploadFile, File, Request, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, EmailStr
-from typing import Optional, List, Dict, Any
+from typing import Optional, Dict, Any
 from datetime import datetime, timezone, timedelta
 import csv
 import io
@@ -16,14 +16,6 @@ from pymongo import MongoClient
 from bson import ObjectId
 
 from dotenv import load_dotenv
-from logger_config import (
-    api_logger, 
-    interview_processing_logger,
-    log_api_request, 
-    log_api_response, 
-    log_database_operation,
-    log_email_operation
-)
 from pdf_utils import (
     create_simple_pdf_from_text,
     get_chat_history,
@@ -32,8 +24,7 @@ from pdf_utils import (
     link_agent_with_rag,
     upload_pdf_to_s3,
     train_text_directly,
-    generate_signed_url,
-    get_s3_key_from_url
+    generate_signed_url
 )
 load_dotenv()
 
@@ -42,20 +33,6 @@ S3_BUCKET = os.getenv("AWS_S3_BUCKET")
 AWS_REGION = os.getenv("AWS_REGION")
 
 app = FastAPI()
-
-# -----------------------------
-# LOGGING MIDDLEWARE
-# -----------------------------
-@app.middleware("http")
-async def log_requests(request: Request, call_next):
-    start_time = time.time()
-    user_id = request.path_params.get('user_id', 'unknown')
-    log_api_request(api_logger, request.url.path, request.method, user_id)
-    response = await call_next(request)
-    execution_time = (time.time() - start_time) * 1000
-    log_api_response(api_logger, request.url.path, response.status_code, execution_time, user_id)
-
-    return response
 
 # -----------------------------
 # MIDDLEWARE
@@ -84,10 +61,10 @@ try:
     
     # Test connection
     client.admin.command('ping')
-    api_logger.info("Successfully connected to MongoDB", extra={'database': 'data_collection_agent'})
+    print("Successfully connected to MongoDB")
     
 except Exception as e:
-    api_logger.critical(f"Failed to connect to MongoDB: {e}", extra={'error_type': 'database_connection'})
+    print(f"Failed to connect to MongoDB: {e}")
     raise
 
 # -----------------------------
@@ -202,11 +179,11 @@ def create_account(account: Account):
             return {"message": "Account already exists", "user_id": account.user_id}
         
         accounts_col.insert_one(account.dict())
-        api_logger.info(f"Account created: {account.user_id}")
+        print(f"Account created: {account.user_id}")
         return account
         
     except Exception as e:
-        api_logger.error(f"Failed to create account {account.user_id}: {e}")
+        print(f"Failed to create account {account.user_id}: {e}")
         raise HTTPException(status_code=500, detail="Failed to create account")
 
 @app.get("/accounts/{user_id}")
@@ -222,7 +199,7 @@ def get_account(user_id: str):
     except HTTPException:
         raise
     except Exception as e:
-        api_logger.error(f"Failed to get account {user_id}: {e}")
+        print(f"Failed to get account {user_id}: {e}")
         raise HTTPException(status_code=500, detail="Failed to get account")
 
 @app.patch("/accounts/{user_id}")
@@ -242,13 +219,13 @@ def update_account(user_id: str, updates: AccountUpdateRequest):
         if result.matched_count == 0:
             raise HTTPException(status_code=404, detail="Account not found")
             
-        api_logger.info(f"Account updated: {user_id}")
+        print(f"Account updated: {user_id}")
         return {"message": "Account updated successfully", "user_id": user_id}
         
     except HTTPException:
         raise
     except Exception as e:
-        api_logger.error(f"Failed to update account {user_id}: {e}")
+        print(f"Failed to update account {user_id}: {e}")
         raise HTTPException(status_code=500, detail="Failed to update account")
 
 ## ------------------------
@@ -258,12 +235,12 @@ def update_account(user_id: str, updates: AccountUpdateRequest):
 def create_agent_with_kb(request: AgentCreateRequest):
     """Create an interview agent and knowledge base (WITHOUT linking them)"""
     try:
-        api_logger.info(f"Creating interview agent and KB for user: {request.user_id}")
+        print(f"Creating interview agent and KB for user: {request.user_id}")
         
         sanitized_prompt = request.prompt.replace('\r', '').replace('\t', ' ').replace('\n', ' ').strip()
 
         # 1. Create the interview agent
-        api_logger.info(f"Step 1: Creating interview agent with name: {request.name}")
+        print(f"Step 1: Creating interview agent with name: {request.name}")
         agent_response = create_lyzr_agent(
             name=request.name,
             prompt=sanitized_prompt,
@@ -272,26 +249,26 @@ def create_agent_with_kb(request: AgentCreateRequest):
         )
         agent_id = agent_response.get("agent_id")
         if not agent_id:
-            api_logger.error(f"Agent creation failed - no ID in response: {agent_response}")
+            print(f"Agent creation failed - no ID in response: {agent_response}")
             raise HTTPException(status_code=500, detail=f"Failed to get agent ID from response: {agent_response}")
         
-        api_logger.info(f"Step 1 completed: Interview agent created with ID: {agent_id}")
+        print(f"Step 1 completed: Interview agent created with ID: {agent_id}")
         
         # 2. Create the knowledge base
-        api_logger.info(f"Step 2: Creating knowledge base")
+        print(f"Step 2: Creating knowledge base")
         kb_response = create_lyzr_rag_kb(
             name=f"{request.name} Knowledge Base",
             api_key=request.token
         )
         rag_id = kb_response.get("id")
         if not rag_id:
-            api_logger.error(f"KB creation failed - no ID in response: {kb_response}")
+            print(f"KB creation failed - no ID in response: {kb_response}")
             raise HTTPException(status_code=500, detail=f"Failed to get knowledge base ID from response: {kb_response}")
         
-        api_logger.info(f"Step 2 completed: Knowledge base created with ID: {rag_id}")
+        print(f"Step 2 completed: Knowledge base created with ID: {rag_id}")
         
         # 3. Update user account with agent and KB IDs (NO LINKING)
-        api_logger.info(f"Step 3: Updating user account with interview agent and KB IDs")
+        print(f"Step 3: Updating user account with interview agent and KB IDs")
         update_data = {
             "agent_id": agent_id,
             "rag_id": rag_id,
@@ -305,11 +282,11 @@ def create_agent_with_kb(request: AgentCreateRequest):
         )
         
         if result.matched_count == 0:
-            api_logger.warning(f"Account not found for user {request.user_id}, but agent/KB created successfully")
+            print(f"Account not found for user {request.user_id}, but agent/KB created successfully")
         else:
-            api_logger.info(f"Step 3 completed: User account updated successfully")
+            print(f"Step 3 completed: User account updated successfully")
         
-        api_logger.info(f"Interview agent and KB creation completed successfully for user: {request.user_id}")
+        print(f"Interview agent and KB creation completed successfully for user: {request.user_id}")
         return {
             "message": "Interview agent and knowledge base created successfully (not linked)",
             "agent_id": agent_id,
@@ -322,14 +299,14 @@ def create_agent_with_kb(request: AgentCreateRequest):
     except HTTPException:
         raise
     except Exception as e:
-        api_logger.error(f"Failed to create interview agent and KB for user {request.user_id}: {e}", exc_info=True)
+        print(f"Failed to create interview agent and KB for user {request.user_id}: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to create interview agent and knowledge base: {str(e)}")
 
 @app.post("/agents/chat/create")
 def create_chat_agent_with_kb_link(request: ChatAgentCreateRequest):
     """Create a chat agent and link it with existing knowledge base"""
     try:
-        api_logger.info(f"Creating chat agent for user: {request.user_id}")
+        print(f"Creating chat agent for user: {request.user_id}")
         
         # Get user account to fetch existing rag_id
         user_account = accounts_col.find_one({"user_id": request.user_id})
@@ -343,7 +320,7 @@ def create_chat_agent_with_kb_link(request: ChatAgentCreateRequest):
         sanitized_prompt = request.prompt.replace('\r', '').replace('\t', ' ').replace('\n', ' ').strip()
 
         # 1. Create the chat agent
-        api_logger.info(f"Step 1: Creating chat agent with name: {request.name}")
+        print(f"Step 1: Creating chat agent with name: {request.name}")
         agent_response = create_lyzr_agent(
             name=request.name,
             prompt=sanitized_prompt,
@@ -352,13 +329,13 @@ def create_chat_agent_with_kb_link(request: ChatAgentCreateRequest):
         )
         chat_agent_id = agent_response.get("agent_id")
         if not chat_agent_id:
-            api_logger.error(f"Chat agent creation failed - no ID in response: {agent_response}")
+            print(f"Chat agent creation failed - no ID in response: {agent_response}")
             raise HTTPException(status_code=500, detail=f"Failed to get chat agent ID from response: {agent_response}")
         
-        api_logger.info(f"Step 1 completed: Chat agent created with ID: {chat_agent_id}")
+        print(f"Step 1 completed: Chat agent created with ID: {chat_agent_id}")
         
         # 2. Link chat agent with existing knowledge base
-        api_logger.info(f"Step 2: Linking chat agent {chat_agent_id} with existing KB {rag_id}")
+        print(f"Step 2: Linking chat agent {chat_agent_id} with existing KB {rag_id}")
         link_response = link_agent_with_rag(
             agent_id=chat_agent_id,
             rag_id=rag_id,
@@ -368,10 +345,10 @@ def create_chat_agent_with_kb_link(request: ChatAgentCreateRequest):
             api_key=request.token
         )
         
-        api_logger.info(f"Step 2 completed: Chat agent linked with KB successfully")
+        print(f"Step 2 completed: Chat agent linked with KB successfully")
         
         # 3. Update user account with chat agent ID
-        api_logger.info(f"Step 3: Updating user account with chat agent ID")
+        print(f"Step 3: Updating user account with chat agent ID")
         update_data = {
             "chat_agent_id": chat_agent_id,
             "updated_at": datetime.now(timezone.utc)
@@ -383,11 +360,11 @@ def create_chat_agent_with_kb_link(request: ChatAgentCreateRequest):
         )
         
         if result.matched_count == 0:
-            api_logger.warning(f"Account not found for user {request.user_id}, but chat agent created successfully")
+            print(f"Account not found for user {request.user_id}, but chat agent created successfully")
         else:
-            api_logger.info(f"Step 3 completed: User account updated successfully")
+            print(f"Step 3 completed: User account updated successfully")
         
-        api_logger.info(f"Chat agent creation and linking completed successfully for user: {request.user_id}")
+        print(f"Chat agent creation and linking completed successfully for user: {request.user_id}")
         return {
             "message": "Chat agent created and linked with knowledge base successfully",
             "chat_agent_id": chat_agent_id,
@@ -399,14 +376,14 @@ def create_chat_agent_with_kb_link(request: ChatAgentCreateRequest):
     except HTTPException:
         raise
     except Exception as e:
-        api_logger.error(f"Failed to create chat agent for user {request.user_id}: {e}", exc_info=True)
+        print(f"Failed to create chat agent for user {request.user_id}: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to create chat agent: {str(e)}")
 
 @app.get("/agents/{agent_id}/info")
 def get_agent_info(agent_id: str):
     """Get public agent information by agent_id"""
     try:
-        api_logger.info(f"Fetching agent info for: {agent_id}")
+        print(f"Fetching agent info for: {agent_id}")
         
         # Find user account with this agent_id
         user_account = accounts_col.find_one({"agent_id": agent_id})
@@ -426,7 +403,7 @@ def get_agent_info(agent_id: str):
     except HTTPException:
         raise
     except Exception as e:
-        api_logger.error(f"Failed to get agent info {agent_id}: {e}")
+        print(f"Failed to get agent info {agent_id}: {e}")
         raise HTTPException(status_code=500, detail="Failed to get agent info")
 
 
@@ -440,7 +417,7 @@ def add_email(email: Email):
         return email
         
     except Exception as e:
-        api_logger.error(f"Failed to add email {email.email}: {e}")
+        print(f"Failed to add email {email.email}: {e}")
         raise HTTPException(status_code=500, detail="Failed to add email")
 
 @app.post("/emails/upload-csv")
@@ -476,13 +453,13 @@ def upload_emails_csv(user_id: str, file: UploadFile = File(...)):
                     else:
                         skipped += 1
                         
-        api_logger.info(f"CSV uploaded for {user_id}: {inserted} emails added, {skipped} skipped")
+        print(f"CSV uploaded for {user_id}: {inserted} emails added, {skipped} skipped")
         return {"message": f"{inserted} emails added for user {user_id}", "skipped": skipped}
         
     except HTTPException:
         raise
     except Exception as e:
-        api_logger.error(f"CSV upload failed for user {user_id}: {e}")
+        print(f"CSV upload failed for user {user_id}: {e}")
         raise HTTPException(status_code=500, detail="Failed to process CSV file")
 
 @app.get("/emails/{user_id}")
@@ -494,14 +471,14 @@ def list_emails(user_id: str):
         return records
         
     except Exception as e:
-        api_logger.error(f"Failed to fetch emails for user {user_id}: {e}")
+        print(f"Failed to fetch emails for user {user_id}: {e}")
         raise HTTPException(status_code=500, detail="Failed to fetch emails")
 
 @app.delete("/emails/{user_id}/{email}")
 def delete_email_cascade(user_id: str, email: str):
     """Delete an email and all related data (cascade delete)"""
     
-    api_logger.info(f"Starting cascade delete for email {email}, user: {user_id}")
+    print(f"Starting cascade delete for email {email}, user: {user_id}")
     deleted_counts = {}
     
     try:
@@ -521,12 +498,9 @@ def delete_email_cascade(user_id: str, email: str):
         total_deleted = sum(deleted_counts.values())
         
         if total_deleted == 0:
-            api_logger.warning(f"No records found for cascade delete: {email}, user: {user_id}")
             raise HTTPException(status_code=404, detail=f"No records found for email {email}")
         
-        log_database_operation(api_logger, "DELETE_CASCADE", "multiple", user_id, 
-                             f"Deleted {total_deleted} records for email: {email}")
-        api_logger.info(f"Successfully completed cascade delete for email {email}, user: {user_id}, total deleted: {total_deleted}")
+        print(f"Successfully completed cascade delete for email {email}, user: {user_id}, total deleted: {total_deleted}")
         
         return {
             "message": f"Successfully deleted email {email} and all related data",
@@ -539,21 +513,20 @@ def delete_email_cascade(user_id: str, email: str):
     except HTTPException:
         raise
     except Exception as e:
-        api_logger.error(f"Error during cascade delete for email {email}, user {user_id}: {e}",
-                        extra={'user_id': user_id, 'email': email, 'error_type': 'cascade_delete'})
+        print(f"Error during cascade delete for email {email}, user {user_id}: {e}")
         raise HTTPException(status_code=500, detail=f"Error during cascade delete: {str(e)}")
 
 @app.put("/emails/{user_id}/{email}/status")
 def update_email_status(user_id: str, email: str, status: str, error_message: str = None):
     """Update email status (sent, failed, delivered, bounced, etc.)"""
     
-    api_logger.info(f"Updating email status for {email}, user: {user_id}, new status: {status}")
+    print(f"Updating email status for {email}, user: {user_id}, new status: {status}")
     
     try:
         # Find the email record
         email_record = emails_col.find_one({"user_id": user_id, "email": email})
         if not email_record:
-            api_logger.warning(f"Email {email} not found for user {user_id} during status update")
+            print(f"Email {email} not found for user {user_id} during status update")
             raise HTTPException(status_code=404, detail=f"Email {email} not found for user {user_id}")
         
         # Prepare update operations
@@ -569,7 +542,7 @@ def update_email_status(user_id: str, email: str, status: str, error_message: st
         if error_message:
             set_fields["error_message"] = error_message
             update_operations["$set"] = set_fields
-            api_logger.warning(f"Email status update with error for {email}: {error_message}")
+            print(f"Email status update with error for {email}: {error_message}")
         else:
             # For successful statuses, remove error message if it exists
             if status in ["sent", "delivered", "opened", "clicked"]:
@@ -585,15 +558,12 @@ def update_email_status(user_id: str, email: str, status: str, error_message: st
         )
         
         if result.modified_count == 0:
-            api_logger.error(f"Failed to update email status for {email}, user: {user_id}")
+            print(f"Failed to update email status for {email}, user: {user_id}")
             raise HTTPException(status_code=500, detail="Failed to update email status")
         
         # Return updated record
         updated_record = emails_col.find_one({"user_id": user_id, "email": email})
         updated_record["_id"] = str(updated_record["_id"])
-        
-        log_database_operation(api_logger, "UPDATE", "emails", user_id, f"Updated status to {status} for email: {email}")
-        log_email_operation(api_logger, "status_update", email, user_id, True, f"Status: {status}")
         
         return {
             "message": f"Email status updated to {status}",
@@ -605,7 +575,7 @@ def update_email_status(user_id: str, email: str, status: str, error_message: st
     except HTTPException:
         raise
     except Exception as e:
-        api_logger.error(f"Error updating email status for {email}, user {user_id}: {e}",
+        print(f"Error updating email status for {email}, user {user_id}: {e}",
                         extra={'user_id': user_id, 'email': email, 'error_type': 'status_update'})
         raise HTTPException(status_code=500, detail=f"Error updating email status: {str(e)}")
 
@@ -657,38 +627,34 @@ def patch_email_fields(user_id: str, email: str, updates: dict):
 @app.post("/smtp")
 def set_smtp(smtp: SMTPCreds):
     try:
-        api_logger.info(f"Setting SMTP credentials for user: {smtp.user_id}, host: {smtp.host}")
+        print(f"Setting SMTP credentials for user: {smtp.user_id}, host: {smtp.host}")
         
         smtp_col.replace_one({"user_id": smtp.user_id}, smtp.dict(), upsert=True)
-        log_database_operation(api_logger, "UPSERT", "smtp_credentials", smtp.user_id, f"SMTP host: {smtp.host}")
         
-        api_logger.info(f"Successfully configured SMTP for user: {smtp.user_id}")
+        print(f"Successfully configured SMTP for user: {smtp.user_id}")
         return smtp
         
     except Exception as e:
-        api_logger.error(f"Failed to set SMTP credentials for user {smtp.user_id}: {e}",
+        print(f"Failed to set SMTP credentials for user {smtp.user_id}: {e}",
                         extra={'user_id': smtp.user_id, 'error_type': 'smtp_config'})
         raise HTTPException(status_code=500, detail="Failed to configure SMTP")
 
 @app.get("/smtp/{user_id}")
 def get_smtp(user_id: str):
     try:
-        api_logger.info(f"Fetching SMTP credentials for user: {user_id}")
+        print(f"Fetching SMTP credentials for user: {user_id}")
         
         smtp = smtp_col.find_one({"user_id": user_id})
         if not smtp:
-            api_logger.warning(f"SMTP config not found for user: {user_id}")
+            print(f"SMTP config not found for user: {user_id}")
             raise HTTPException(status_code=404, detail="SMTP config not found")
             
-        smtp["_id"] = str(smtp["_id"])  # Convert ObjectId to string
-        log_database_operation(api_logger, "SELECT", "smtp_credentials", user_id, "SMTP config retrieved")
-        
-        return smtp
+        smtp["_id"] = str(smtp["_id"])  # Convert ObjectId to string        return smtp
         
     except HTTPException:
         raise
     except Exception as e:
-        api_logger.error(f"Failed to fetch SMTP config for user {user_id}: {e}",
+        print(f"Failed to fetch SMTP config for user {user_id}: {e}",
                         extra={'user_id': user_id, 'error_type': 'smtp_retrieval'})
         raise HTTPException(status_code=500, detail="Failed to fetch SMTP config")
 
@@ -698,39 +664,36 @@ def get_smtp(user_id: str):
 @app.post("/scheduler")
 def set_scheduler(s: Scheduler):
     try:
-        api_logger.info(f"Setting scheduler for user: {s.user_id}, interval: {s.interval}min, time: {s.time}")
+        print(f"Setting scheduler for user: {s.user_id}, interval: {s.interval}min, time: {s.time}")
         
         scheduler_col.replace_one({"user_id": s.user_id}, s.dict(), upsert=True)
-        log_database_operation(api_logger, "UPSERT", "schedulers", s.user_id, 
-                             f"Interval: {s.interval}min, Time: {s.time}, Max: {s.max_limit}")
         
-        api_logger.info(f"Successfully configured scheduler for user: {s.user_id}")
+        print(f"Successfully configured scheduler for user: {s.user_id}")
         return s
         
     except Exception as e:
-        api_logger.error(f"Failed to set scheduler for user {s.user_id}: {e}",
+        print(f"Failed to set scheduler for user {s.user_id}: {e}",
                         extra={'user_id': s.user_id, 'error_type': 'scheduler_config'})
         raise HTTPException(status_code=500, detail="Failed to configure scheduler")
 
 @app.get("/scheduler/{user_id}")
 def get_scheduler(user_id: str):
     try:
-        api_logger.info(f"Fetching scheduler for user: {user_id}")
+        print(f"Fetching scheduler for user: {user_id}")
         
         sched = scheduler_col.find_one({"user_id": user_id})
         if not sched:
-            api_logger.warning(f"Scheduler not found for user: {user_id}")
+            print(f"Scheduler not found for user: {user_id}")
             raise HTTPException(status_code=404, detail="Scheduler not found")
             
         sched["_id"] = str(sched["_id"])
-        log_database_operation(api_logger, "SELECT", "schedulers", user_id, "Scheduler config retrieved")
         
         return sched
         
     except HTTPException:
         raise
     except Exception as e:
-        api_logger.error(f"Failed to fetch scheduler for user {user_id}: {e}",
+        print(f"Failed to fetch scheduler for user {user_id}: {e}",
                         extra={'user_id': user_id, 'error_type': 'scheduler_retrieval'})
         raise HTTPException(status_code=500, detail="Failed to fetch scheduler")
 
@@ -740,7 +703,7 @@ def get_scheduler(user_id: str):
 @app.post("/interview/start")
 def start_interview(user_id: str, email: EmailStr):
     try:
-        api_logger.info(f"Starting interview for user: {user_id}, email: {email}")
+        print(f"Starting interview for user: {user_id}, email: {email}")
         
         token = f"{user_id}-{email}"
         interview = Interview(
@@ -753,24 +716,23 @@ def start_interview(user_id: str, email: EmailStr):
         )
         interviews_col.insert_one(interview.dict())
         
-        log_database_operation(api_logger, "INSERT", "interviews", user_id, f"Interview started for: {email}")
-        api_logger.info(f"Successfully started interview for user: {user_id}, email: {email}, token: {token}")
+        print(f"Successfully started interview for user: {user_id}, email: {email}, token: {token}")
         
         return interview
         
     except Exception as e:
-        api_logger.error(f"Failed to start interview for user {user_id}, email {email}: {e}",
+        print(f"Failed to start interview for user {user_id}, email {email}: {e}",
                         extra={'user_id': user_id, 'email': email, 'error_type': 'interview_start'})
         raise HTTPException(status_code=500, detail="Failed to start interview")
 
 @app.post("/interview/complete/{token}")
 def complete_interview(token: str):
     try:
-        api_logger.info(f"Completing interview with token: {token}")
+        print(f"Completing interview with token: {token}")
         
         result = interviews_col.find_one({"token": token})
         if not result:
-            api_logger.warning(f"Interview not found for token: {token}")
+            print(f"Interview not found for token: {token}")
             raise HTTPException(status_code=404, detail="Interview not found")
         
         user_id = result["user_id"]
@@ -814,45 +776,43 @@ def complete_interview(token: str):
         interview["should_redirect_to_chat"] = True
         interview["completion_message"] = "Interview completed! You can continue the conversation in the chat interface."
         
-        log_database_operation(api_logger, "UPDATE", "interviews", interview["user_id"], 
-                             f"Interview completed for: {interview['email']}")
-        api_logger.info(f"Successfully completed interview for token: {token}")
+        print(f"Successfully completed interview for token: {token}")
         
         return interview
         
     except HTTPException:
         raise
     except Exception as e:
-        api_logger.error(f"Failed to complete interview for token {token}: {e}",
+        print(f"Failed to complete interview for token {token}: {e}",
                         extra={'token': token, 'error_type': 'interview_completion'})
         raise HTTPException(status_code=500, detail="Failed to complete interview")
 
 @app.get("/interview/status/{user_id}/{email}")
 def check_interview_status(user_id: str, email: EmailStr):
     try:
-        api_logger.info(f"Checking interview status for user: {user_id}, email: {email}")
+        print(f"Checking interview status for user: {user_id}, email: {email}")
         
         token = f"{user_id}-{email}"
         result = interviews_col.find_one({"token": token})
         
         status = result.get("status", "pending") if result else "not started"
-        api_logger.info(f"Interview status for {email}: {status}")
+        print(f"Interview status for {email}: {status}")
         
         return {"status": status}
         
     except Exception as e:
-        api_logger.error(f"Failed to check interview status for user {user_id}, email {email}: {e}",
+        print(f"Failed to check interview status for user {user_id}, email {email}: {e}",
                         extra={'user_id': user_id, 'email': email, 'error_type': 'interview_status_check'})
         raise HTTPException(status_code=500, detail="Failed to check interview status")
 
 @app.get("/interview/{token}")
 def get_interview(token: str):
     try:
-        api_logger.info(f"Fetching interview details for token: {token}")
+        print(f"Fetching interview details for token: {token}")
         
         interview = interviews_col.find_one({"token": token})
         if not interview:
-            api_logger.warning(f"Interview not found for token: {token}")
+            print(f"Interview not found for token: {token}")
             raise HTTPException(status_code=404, detail="Interview not found")
             
         interview["_id"] = str(interview["_id"])
@@ -880,14 +840,12 @@ def get_interview(token: str):
         else:
             interview["chat_link"] = f"http://localhost:3000/chat/{encoded_session_id}"
         
-        log_database_operation(api_logger, "SELECT", "interviews", interview["user_id"], f"Interview details retrieved")
-        
         return interview
         
     except HTTPException:
         raise
     except Exception as e:
-        api_logger.error(f"Failed to fetch interview for token {token}: {e}",
+        print(f"Failed to fetch interview for token {token}: {e}",
                         extra={'token': token, 'error_type': 'interview_retrieval'})
         raise HTTPException(status_code=500, detail="Failed to fetch interview")
 
@@ -895,7 +853,7 @@ def get_interview(token: str):
 def redirect_to_chat(token: str):
     """Redirect from old interview URL to new chat URL"""
     try:
-        api_logger.info(f"Redirecting token {token} to chat interface")
+        print(f"Redirecting token {token} to chat interface")
         
         interview = interviews_col.find_one({"token": token})
         if not interview:
@@ -930,7 +888,7 @@ def redirect_to_chat(token: str):
         }
         
     except Exception as e:
-        api_logger.error(f"Failed to redirect token {token}: {e}")
+        print(f"Failed to redirect token {token}: {e}")
         raise HTTPException(status_code=500, detail="Failed to redirect to chat")
 
 ## -------------------
@@ -940,22 +898,19 @@ def redirect_to_chat(token: str):
 def get_email_thread(user_id: str, email: str):
     """Get email thread/conversation history for a specific email address"""
     try:
-        api_logger.info(f"Fetching email thread for user: {user_id}, email: {email}")
+        print(f"Fetching email thread for user: {user_id}, email: {email}")
         
         thread = list(email_contents_col.find(
             {"user_id": user_id, "email": email}
         ).sort("follow_up_number", 1))
         
         if not thread:
-            api_logger.info(f"No email thread found for user: {user_id}, email: {email}")
+            print(f"No email thread found for user: {user_id}, email: {email}")
             return {"email": email, "thread": [], "total_emails": 0}
         
         # Convert ObjectId to string
         for email_record in thread:
             email_record["_id"] = str(email_record["_id"])
-        
-        log_database_operation(api_logger, "SELECT", "email_contents", user_id, 
-                             f"Retrieved thread with {len(thread)} emails for: {email}")
         
         return {
             "email": email,
@@ -965,7 +920,7 @@ def get_email_thread(user_id: str, email: str):
         }
         
     except Exception as e:
-        api_logger.error(f"Failed to fetch email thread for user {user_id}, email {email}: {e}",
+        print(f"Failed to fetch email thread for user {user_id}, email {email}: {e}",
                         extra={'user_id': user_id, 'email': email, 'error_type': 'thread_retrieval'})
         raise HTTPException(status_code=500, detail="Failed to fetch email thread")
 
@@ -973,7 +928,7 @@ def get_email_thread(user_id: str, email: str):
 def get_all_email_threads(user_id: str):
     """Get all email threads for a user with summary"""
     try:
-        api_logger.info(f"Fetching all email threads for user: {user_id}")
+        print(f"Fetching all email threads for user: {user_id}")
         
         # Get all unique emails for this user
         pipeline = [
@@ -1000,14 +955,12 @@ def get_all_email_threads(user_id: str):
                 "latest_follow_up_number": thread["latest_follow_up"]
             })
         
-        log_database_operation(api_logger, "AGGREGATE", "email_contents", user_id, 
-                             f"Retrieved {len(result)} thread summaries")
-        api_logger.info(f"Successfully fetched {len(result)} email threads for user: {user_id}")
+        print(f"Successfully fetched {len(result)} email threads for user: {user_id}")
         
         return {"threads": result, "total_conversations": len(result)}
         
     except Exception as e:
-        api_logger.error(f"Failed to fetch email threads for user {user_id}: {e}",
+        print(f"Failed to fetch email threads for user {user_id}: {e}",
                         extra={'user_id': user_id, 'error_type': 'threads_retrieval'})
         raise HTTPException(status_code=500, detail="Failed to fetch email threads")
 
@@ -1021,7 +974,7 @@ def get_all_email_threads(user_id: str):
 async def send_interview_message_stream(chat_msg: ChatMessage):
     """Send message to interview agent (streaming, tracks message count)"""
     try:
-        api_logger.info(f"Sending interview message for user: {chat_msg.user_id}, session: {chat_msg.session_id}")
+        print(f"Sending interview message for user: {chat_msg.user_id}, session: {chat_msg.session_id}")
         
         # Get user account to fetch API key
         user_account = accounts_col.find_one({"user_id": chat_msg.user_id})
@@ -1081,12 +1034,7 @@ async def send_interview_message_stream(chat_msg: ChatMessage):
             
             # Get updated message count
             updated_session = chat_sessions_col.find_one(session_filter)
-            message_count = updated_session.get("message_count", 1)
-        
-        log_database_operation(api_logger, "UPSERT", "chat_sessions", chat_msg.user_id, 
-                             f"Interview message sent, session: {chat_msg.session_id}, count: {message_count}")
-        
-        # Use streaming response for interview agent (same as chat agent but with message count)
+            message_count = updated_session.get("message_count", 1)        # Use streaming response for interview agent (same as chat agent but with message count)
         async def generate_stream():
             try:
                 # Send initial message count
@@ -1138,7 +1086,7 @@ async def send_interview_message_stream(chat_msg: ChatMessage):
                             await asyncio.sleep(0.01)  # Small delay for smooth streaming
                         
             except Exception as e:
-                api_logger.error(f"Interview streaming error: {e}")
+                print(f"Interview streaming error: {e}")
                 yield f"data: {{\"error\": \"Streaming failed\"}}\n\n"
                 yield f"data: [DONE]\n\n"
         
@@ -1157,7 +1105,7 @@ async def send_interview_message_stream(chat_msg: ChatMessage):
     except HTTPException:
         raise
     except Exception as e:
-        api_logger.error(f"Failed to send interview message for user {chat_msg.user_id}: {e}",
+        print(f"Failed to send interview message for user {chat_msg.user_id}: {e}",
                         extra={'user_id': chat_msg.user_id, 'error_type': 'interview_send'})
         raise HTTPException(status_code=500, detail="Failed to send interview message")
 
@@ -1166,7 +1114,7 @@ async def send_interview_message_stream(chat_msg: ChatMessage):
 async def send_chat_agent_message_stream(chat_msg: ChatMessage):
     """Send message to chat agent with streaming response (no message count tracking)"""
     try:
-        api_logger.info(f"Sending chat agent message for user: {chat_msg.user_id}, session: {chat_msg.session_id}")
+        print(f"Sending chat agent message for user: {chat_msg.user_id}, session: {chat_msg.session_id}")
         
         # Get user account to fetch API key and chat_agent_id
         user_account = accounts_col.find_one({"user_id": chat_msg.user_id})
@@ -1204,10 +1152,7 @@ async def send_chat_agent_message_stream(chat_msg: ChatMessage):
         
         # chat_sessions_col.update_one(session_filter, session_update, upsert=True)
         
-        # log_database_operation(api_logger, "UPSERT", "chat_sessions", chat_msg.user_id, 
-        #                      f"Chat agent session updated, session: {chat_msg.session_id}")
-        
-        # Use streaming response for chat agent
+        #        # Use streaming response for chat agent
         async def generate_stream():
             try:
                 headers = {
@@ -1244,7 +1189,7 @@ async def send_chat_agent_message_stream(chat_msg: ChatMessage):
                             await asyncio.sleep(0.01)  # Small delay for smooth streaming
                         
             except Exception as e:
-                api_logger.error(f"Chat agent streaming error: {e}")
+                print(f"Chat agent streaming error: {e}")
                 yield f"data: {{\"error\": \"Streaming failed\"}}\n\n"
                 yield f"data: [DONE]\n\n"
         
@@ -1263,7 +1208,7 @@ async def send_chat_agent_message_stream(chat_msg: ChatMessage):
     except HTTPException:
         raise
     except Exception as e:
-        api_logger.error(f"Failed to send chat agent message for user {chat_msg.user_id}: {e}",
+        print(f"Failed to send chat agent message for user {chat_msg.user_id}: {e}",
                         extra={'user_id': chat_msg.user_id, 'error_type': 'chat_agent_send'})
         raise HTTPException(status_code=500, detail="Failed to send chat agent message")
 
@@ -1275,7 +1220,7 @@ async def send_chat_agent_message_stream(chat_msg: ChatMessage):
 def get_chat_history_api(session_id: str, agent_id: str = None):
     """Get chat history for a session"""
     try:
-        api_logger.info(f"Fetching chat history for session: {session_id}")
+        print(f"Fetching chat history for session: {session_id}")
         
         # Parse session_id to get user_id (handle cases where user_id might contain '+')
         # Split on the last '+' to properly separate user_id and email
@@ -1304,7 +1249,7 @@ def get_chat_history_api(session_id: str, agent_id: str = None):
         }
         
     except Exception as e:
-        api_logger.error(f"Failed to fetch chat history for session {session_id}: {e}",
+        print(f"Failed to fetch chat history for session {session_id}: {e}",
                         extra={'session_id': session_id, 'error_type': 'chat_history'})
         raise HTTPException(status_code=500, detail="Failed to fetch chat history")
 
@@ -1316,7 +1261,7 @@ def get_chat_history_api(session_id: str, agent_id: str = None):
 def complete_interview_by_session(session_id: str):
     """Complete interview by session_id - Public endpoint for interview participants"""
     try:
-        api_logger.info(f"Completing interview by session: {session_id}")
+        print(f"Completing interview by session: {session_id}")
         
         # Parse session_id to get user_id and email
         try:
@@ -1326,7 +1271,7 @@ def complete_interview_by_session(session_id: str):
             user_id = session_id[:last_plus_index]
             email = session_id[last_plus_index + 1:]
         except:
-            api_logger.error(f"Invalid session_id format: {session_id}")
+            print(f"Invalid session_id format: {session_id}")
             raise HTTPException(status_code=400, detail="Invalid session_id format")
         
         # Find or create interview record
@@ -1344,14 +1289,14 @@ def complete_interview_by_session(session_id: str):
                 "completed_at": datetime.utcnow()
             }
             interviews_col.insert_one(interview)
-            api_logger.info(f"Created new interview record for session: {session_id}")
+            print(f"Created new interview record for session: {session_id}")
         else:
             # Update existing interview
             interviews_col.update_one(
                 {"token": token},
                 {"$set": {"status": "completed", "completed_at": datetime.utcnow()}}
             )
-            api_logger.info(f"Updated existing interview record for session: {session_id}")
+            print(f"Updated existing interview record for session: {session_id}")
         
         # Create or update chat session
         chat_session = chat_sessions_col.find_one({"session_id": session_id})
@@ -1374,17 +1319,14 @@ def complete_interview_by_session(session_id: str):
                 "message_count": 0
             }
             chat_sessions_col.insert_one(chat_session)
-            api_logger.info(f"Created new chat session for session: {session_id}")
+            print(f"Created new chat session for session: {session_id}")
         else:
             # Update existing session
             chat_sessions_col.update_one(
                 {"session_id": session_id},
                 {"$set": {"session_status": "completed", "completed_at": datetime.utcnow()}}
             )
-            api_logger.info(f"Updated existing chat session for session: {session_id}")
-        
-        log_database_operation(api_logger, "UPDATE", "interviews", user_id, 
-                             f"Interview completed for session: {session_id}")
+            print(f"Updated existing chat session for session: {session_id}")
         
         return {
             "message": "Interview completed successfully",
@@ -1398,7 +1340,7 @@ def complete_interview_by_session(session_id: str):
     except HTTPException:
         raise
     except Exception as e:
-        api_logger.error(f"Failed to complete interview for session {session_id}: {e}",
+        print(f"Failed to complete interview for session {session_id}: {e}",
                         extra={'session_id': session_id, 'error_type': 'interview_complete'})
         raise HTTPException(status_code=500, detail="Failed to complete interview")
 
@@ -1419,13 +1361,13 @@ def process_interview_completion(request: InterviewProcessRequest):
             raise HTTPException(status_code=400, detail="No API key found for user")
         
         # Step 1: Get chat history
-        api_logger.info(f"Step 1: Getting chat history for session: {session_id}")
+        print(f"Step 1: Getting chat history for session: {session_id}")
         chat_history = get_chat_history(session_id=session_id, api_key=api_key)
         if not chat_history:
             raise HTTPException(status_code=404, detail="No chat history found")
         
         # Step 2: Generate PDF from chat history
-        api_logger.info(f"Step 2: Generating PDF for session: {session_id}")
+        print(f"Step 2: Generating PDF for session: {session_id}")
         pdf_file = create_simple_pdf_from_text(json.dumps(chat_history, indent=2))
         pdf_content = pdf_file.getvalue()
         
@@ -1436,18 +1378,18 @@ def process_interview_completion(request: InterviewProcessRequest):
         signed_url = None
         
         try:
-            api_logger.info(f"Step 3: Uploading PDF to S3 for session: {session_id}")
+            print(f"Step 3: Uploading PDF to S3 for session: {session_id}")
             upload_result = upload_pdf_to_s3(pdf_content, request.user_id, request.email, session_id)
             s3_url = upload_result['s3_url']
             signed_url = upload_result['signed_url']
             s3_upload_success = True
-            api_logger.info(f"Successfully uploaded PDF to S3: {s3_url}")
+            print(f"Successfully uploaded PDF to S3: {s3_url}")
         except Exception as s3_exception:
             s3_error = str(s3_exception)
-            api_logger.error(f"S3 upload failed: {s3_error}")
+            print(f"S3 upload failed: {s3_error}")
         
         # Step 4: Update database records
-        api_logger.info(f"Step 4: Updating database records for session: {session_id}")
+        print(f"Step 4: Updating database records for session: {session_id}")
         update_data = {
             "status": "processed",
             "processed_at": datetime.utcnow(),
@@ -1488,7 +1430,7 @@ def process_interview_completion(request: InterviewProcessRequest):
         if s3_upload_success:
             success_parts.append("uploaded to S3")
         
-        api_logger.info(f"Interview processing completed for session: {session_id}")
+        print(f"Interview processing completed for session: {session_id}")
         
         return {
             "message": f"Interview processed successfully: {', '.join(success_parts)}",
@@ -1517,7 +1459,7 @@ def process_interview_completion(request: InterviewProcessRequest):
     except HTTPException:
         raise
     except Exception as e:
-        api_logger.error(f"Failed to process interview: {e}", exc_info=True)
+        print(f"Failed to process interview: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to process interview: {str(e)}")
 
 @app.post("/interview/kb-training")
@@ -1540,7 +1482,7 @@ def train_kb_with_session(request: InterviewProcessRequest):
             raise HTTPException(status_code=400, detail="No RAG ID found for user")
         
         # Get chat history
-        api_logger.info(f"Training KB with session data: {session_id}")
+        print(f"Training KB with session data: {session_id}")
         chat_history = get_chat_history(session_id=session_id, api_key=api_key)
         if not chat_history:
             raise HTTPException(status_code=404, detail="No chat history found")
@@ -1563,7 +1505,7 @@ def train_kb_with_session(request: InterviewProcessRequest):
         training_error = None
         
         try:
-            api_logger.info(f"Training KB for rag_id: {rag_id}")
+            print(f"Training KB for rag_id: {rag_id}")
             training_result = train_text_directly(
                 text_content=text_content,
                 rag_id=rag_id,
@@ -1574,7 +1516,7 @@ def train_kb_with_session(request: InterviewProcessRequest):
                 extra_info="{}"
             )
             training_success = True
-            api_logger.info(f"KB training successful for rag_id: {rag_id}")
+            print(f"KB training successful for rag_id: {rag_id}")
             
             # Update database records to indicate KB was trained
             chat_sessions_col.update_one(
@@ -1594,7 +1536,7 @@ def train_kb_with_session(request: InterviewProcessRequest):
                 "error": training_error,
                 "error_type": type(training_exception).__name__
             }
-            api_logger.error(f"KB training failed: {training_error}")
+            print(f"KB training failed: {training_error}")
             
             # Update database records to indicate training failure
             chat_sessions_col.update_one(
@@ -1623,7 +1565,7 @@ def train_kb_with_session(request: InterviewProcessRequest):
     except HTTPException:
         raise
     except Exception as e:
-        api_logger.error(f"Failed to train KB with session: {e}", exc_info=True)
+        print(f"Failed to train KB with session: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to train KB: {str(e)}")
 
 
@@ -1648,7 +1590,7 @@ def get_signed_pdf_url(pdf_info: Dict[str, Any]) -> Dict[str, Any]:
         
         return pdf_info
     except Exception as e:
-        api_logger.error(f"Failed to generate signed URL for PDF: {e}")
+        print(f"Failed to generate signed URL for PDF: {e}")
         # Return original info if signing fails
         return pdf_info
 
@@ -1656,7 +1598,7 @@ def get_signed_pdf_url(pdf_info: Dict[str, Any]) -> Dict[str, Any]:
 async def get_pdf_signed_url(pdf_id: str):
     """Generate a signed URL for a specific PDF by ID"""
     try:
-        api_logger.info(f"Generating signed URL for PDF: {pdf_id}")
+        print(f"Generating signed URL for PDF: {pdf_id}")
         
         # First try to find in chat sessions
         pdf_info = chat_sessions_col.find_one({
@@ -1696,14 +1638,14 @@ async def get_pdf_signed_url(pdf_id: str):
     except HTTPException:
         raise
     except Exception as e:
-        api_logger.error(f"Failed to generate signed URL for PDF {pdf_id}: {e}")
+        print(f"Failed to generate signed URL for PDF {pdf_id}: {e}")
         raise HTTPException(status_code=500, detail="Failed to generate signed URL")
 
 @app.get("/knowledge-base/pdfs/{user_id}")
 async def get_user_kb_pdfs(user_id: str):
     """Get all processed PDFs for a user's knowledge base with signed URLs"""
     try:
-        api_logger.info(f"Fetching KB PDFs for user: {user_id}")
+        print(f"Fetching KB PDFs for user: {user_id}")
 
         # Fetch chat sessions with PDFs
         chat_sessions = list(chat_sessions_col.find({
@@ -1775,7 +1717,7 @@ async def get_user_kb_pdfs(user_id: str):
         # Sort by completion date (newest first)
         pdfs.sort(key=lambda x: x.get("completed_at") or "", reverse=True)
         
-        api_logger.info(f"Found {len(pdfs)} PDFs for user {user_id}")
+        print(f"Found {len(pdfs)} PDFs for user {user_id}")
         
         return {
             "user_id": user_id,
@@ -1784,5 +1726,5 @@ async def get_user_kb_pdfs(user_id: str):
         }
         
     except Exception as e:
-        api_logger.error(f"Failed to fetch KB PDFs for user {user_id}: {e}")
+        print(f"Failed to fetch KB PDFs for user {user_id}: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to fetch PDFs: {str(e)}")

@@ -11,7 +11,6 @@ from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.enums import TA_LEFT, TA_RIGHT
 from typing import List, Dict
-from logger_config import api_logger, interview_processing_logger
 import random
 import string
 import json
@@ -38,7 +37,7 @@ def wait_between_operations(seconds: float = 2.0):
 def get_s3_client():
     """Initialize and return S3 client"""
     try:
-        api_logger.info("Initializing S3 client")
+        print("Initializing S3 client")
         
         if not all([AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, S3_BUCKET]):
             missing_vars = []
@@ -50,10 +49,10 @@ def get_s3_client():
                 missing_vars.append("AWS_S3_BUCKET")
             
             error_msg = f"AWS credentials and bucket not properly configured. Missing: {', '.join(missing_vars)}"
-            api_logger.error(error_msg)
+            print(f"ERROR: {error_msg}")
             raise ValueError(error_msg)
         
-        api_logger.info(f"Creating S3 client with region: {AWS_REGION}")
+        print(f"Creating S3 client with region: {AWS_REGION}")
         
         client = boto3.client(
             's3',
@@ -62,11 +61,11 @@ def get_s3_client():
             region_name=AWS_REGION
         )
         
-        api_logger.info("S3 client created successfully")
+        print("S3 client created successfully")
         return client
         
     except Exception as e:
-        api_logger.error(f"Failed to create S3 client: {e}", exc_info=True)
+        print(f"ERROR: Failed to create S3 client: {e}")
         raise
 
 def create_simple_pdf_from_text(text: str) -> io.BytesIO:
@@ -80,7 +79,7 @@ def create_simple_pdf_from_text(text: str) -> io.BytesIO:
         PDF file object (BytesIO)
     """
     try:
-        api_logger.info(f"Creating simple PDF from text, length: {len(text)} characters")
+        print(f"Creating simple PDF from text, length: {len(text)} characters")
         
         buffer = io.BytesIO()
         
@@ -154,11 +153,11 @@ def create_simple_pdf_from_text(text: str) -> io.BytesIO:
         doc.build(story)
         buffer.seek(0)
         
-        api_logger.info(f"Simple PDF created successfully, size: {len(buffer.getvalue())} bytes")
+        print(f"Simple PDF created successfully, size: {len(buffer.getvalue())} bytes")
         return buffer
         
     except Exception as e:
-        api_logger.error(f"Failed to create simple PDF from text: {e}", exc_info=True)
+        print(f"ERROR: Failed to create simple PDF from text: {e}")
         raise
 
 def upload_pdf_to_s3(pdf_content: bytes, user_id: str, email: str, session_id: str) -> str:
@@ -175,24 +174,24 @@ def upload_pdf_to_s3(pdf_content: bytes, user_id: str, email: str, session_id: s
         S3 URL of uploaded PDF
     """
     try:
-        interview_processing_logger.info(f"Starting S3 upload for session: {session_id}, user: {user_id}, email: {email}")
-        interview_processing_logger.info(f"PDF content size: {len(pdf_content)} bytes")
+        print(f"Starting S3 upload for session: {session_id}, user: {user_id}, email: {email}")
+        print(f"PDF content size: {len(pdf_content)} bytes")
         
         # Check S3 configuration
-        interview_processing_logger.info(f"S3 Configuration - Bucket: {S3_BUCKET}, Region: {AWS_REGION}")
-        interview_processing_logger.info(f"AWS credentials available: Access Key: {'Yes' if AWS_ACCESS_KEY_ID else 'No'}, Secret Key: {'Yes' if AWS_SECRET_ACCESS_KEY else 'No'}")
+        print(f"S3 Configuration - Bucket: {S3_BUCKET}, Region: {AWS_REGION}")
+        print(f"AWS credentials available: Access Key: {'Yes' if AWS_ACCESS_KEY_ID else 'No'}, Secret Key: {'Yes' if AWS_SECRET_ACCESS_KEY else 'No'}")
         
         s3_client = get_s3_client()
-        interview_processing_logger.info("S3 client initialized successfully")
+        print("S3 client initialized successfully")
         
         # Generate S3 key
         timestamp = datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')
         safe_email = email.replace('@', '_at_').replace('.', '_')
         s3_key = f"chat_interviews/{user_id}/{safe_email}/{session_id}_{timestamp}.pdf"
-        interview_processing_logger.info(f"Generated S3 key: {s3_key}")
+        print(f"Generated S3 key: {s3_key}")
         
         # Upload to S3
-        interview_processing_logger.info(f"Starting S3 upload to bucket: {S3_BUCKET}")
+        print(f"Starting S3 upload to bucket: {S3_BUCKET}")
         s3_client.put_object(
             Bucket=S3_BUCKET,
             Key=s3_key,
@@ -205,14 +204,14 @@ def upload_pdf_to_s3(pdf_content: bytes, user_id: str, email: str, session_id: s
                 'generated_at': timestamp
             },
         )
-        interview_processing_logger.info(f"S3 upload completed successfully for key: {s3_key}")
+        print(f"S3 upload completed successfully for key: {s3_key}")
         
         # Generate S3 URL and signed URL
         s3_url = f"https://{S3_BUCKET}.s3.{AWS_REGION}.amazonaws.com/{s3_key}"
         signed_url = generate_signed_url(s3_key)
         
-        interview_processing_logger.info(f"PDF uploaded to S3: {s3_url}")
-        interview_processing_logger.info(f"Generated signed URL (expires in 1 hour)")
+        print(f"PDF uploaded to S3: {s3_url}")
+        print(f"Generated signed URL (expires in 1 hour)")
         
         return {
             's3_url': s3_url,
@@ -221,9 +220,9 @@ def upload_pdf_to_s3(pdf_content: bytes, user_id: str, email: str, session_id: s
         }
         
     except Exception as e:
-        interview_processing_logger.error(f"Failed to upload PDF to S3 for session {session_id}: {e}", exc_info=True)
-        interview_processing_logger.error(f"Error type: {type(e).__name__}")
-        interview_processing_logger.error(f"Error details: {str(e)}")
+        print(f"ERROR: Failed to upload PDF to S3 for session {session_id}: {e}")
+        print(f"ERROR: Error type: {type(e).__name__}")
+        print(f"ERROR: Error details: {str(e)}")
         raise
 
 def get_chat_history(session_id: str, api_key: str = None) -> List[Dict]:
@@ -238,52 +237,52 @@ def get_chat_history(session_id: str, api_key: str = None) -> List[Dict]:
         List of chat messages
     """
     try:
-        interview_processing_logger.info(f"Getting chat history for session: {session_id}")
+        print(f"Getting chat history for session: {session_id}")
         
         lyzr_key = api_key
         if not lyzr_key:
-            interview_processing_logger.error("No Lyzr API key provided for chat history")
+            print("ERROR: No Lyzr API key provided for chat history")
             raise ValueError("No Lyzr API key provided")
         
-        interview_processing_logger.info(f"Using Lyzr API key: {lyzr_key[:8]}...{lyzr_key[-4:] if len(lyzr_key) > 12 else '***'}")
+        print(f"Using Lyzr API key: {lyzr_key[:8]}...{lyzr_key[-4:] if len(lyzr_key) > 12 else '***'}")
         
         url = LYZR_HISTORY_API_URL.format(session_id)
-        interview_processing_logger.info(f"Chat history URL: {url}")
+        print(f"Chat history URL: {url}")
         
         headers = {
             'accept': 'application/json',
             'x-api-key': lyzr_key
         }
         
-        interview_processing_logger.info(f"Request headers (without API key): {dict((k, v) for k, v in headers.items() if k != 'x-api-key')}")
+        print(f"Request headers (without API key): {dict((k, v) for k, v in headers.items() if k != 'x-api-key')}")
         
-        interview_processing_logger.info("Sending chat history request to Lyzr API")
+        print("Sending chat history request to Lyzr API")
         response = requests.get(url, headers=headers)
         
-        interview_processing_logger.info(f"Chat history response status code: {response.status_code}")
-        interview_processing_logger.info(f"Chat history response headers: {dict(response.headers)}")
+        print(f"Chat history response status code: {response.status_code}")
+        print(f"Chat history response headers: {dict(response.headers)}")
         
         if not response.ok:
-            interview_processing_logger.error(f"Chat history request failed with status {response.status_code}")
-            interview_processing_logger.error(f"Response content: {response.text}")
+            print(f"ERROR: Chat history request failed with status {response.status_code}")
+            print(f"ERROR: Response content: {response.text}")
             response.raise_for_status()
         
         result = response.json()
-        interview_processing_logger.info(f"Chat history response type: {type(result)}")
+        print(f"Chat history response type: {type(result)}")
         
         if isinstance(result, list):
-            interview_processing_logger.info(f"Retrieved {len(result)} chat messages")
+            print(f"Retrieved {len(result)} chat messages")
             if result:
-                interview_processing_logger.info(f"Sample message keys: {list(result[0].keys()) if result[0] else 'Empty message'}")
+                print(f"Sample message keys: {list(result[0].keys()) if result[0] else 'Empty message'}")
         else:
-            interview_processing_logger.info(f"Chat history response keys: {list(result.keys()) if isinstance(result, dict) else 'Not a dict'}")
+            print(f"Chat history response keys: {list(result.keys()) if isinstance(result, dict) else 'Not a dict'}")
         
         return result
         
     except Exception as e:
-        interview_processing_logger.error(f"Failed to get chat history for session {session_id}: {e}", exc_info=True)
-        interview_processing_logger.error(f"Error type: {type(e).__name__}")
-        interview_processing_logger.error(f"Error details: {str(e)}")
+        print(f"ERROR: Failed to get chat history for session {session_id}: {e}")
+        print(f"ERROR: Error type: {type(e).__name__}")
+        print(f"ERROR: Error details: {str(e)}")
         raise
 
 def send_chat_message(user_id: str, agent_id: str, session_id: str, message: str, api_key: str = None) -> Dict:
@@ -326,7 +325,7 @@ def send_chat_message(user_id: str, agent_id: str, session_id: str, message: str
         }
         
     except Exception as e:
-        api_logger.error(f"Failed to send chat message: {e}")
+        print(f"ERROR: Failed to send chat message: {e}")
         raise
 
 def create_lyzr_agent(name: str, prompt: str, description: str = "AI Interview Agent", api_key: str = None) -> Dict:
@@ -375,29 +374,29 @@ def create_lyzr_agent(name: str, prompt: str, description: str = "AI Interview A
         }
         
         # Log the request data for debugging
-        api_logger.info(f"Sending agent creation request: {data}")
+        print(f"Sending agent creation request: {data}")
         
         response = requests.post(LYZR_CREATE_AGENT_URL, headers=headers, json=data)
         
         # Log response details for debugging
-        api_logger.info(f"Agent creation response status: {response.status_code}")
+        print(f"Agent creation response status: {response.status_code}")
         if not response.ok:
-            api_logger.error(f"Agent creation failed with response: {response.text}")
+            print(f"ERROR: Agent creation failed with response: {response.text}")
         
         response.raise_for_status()
         
         result = response.json()
-        api_logger.info(f"Agent creation response: {result}")
+        print(f"Agent creation response: {result}")
         agent_id = result.get('agent_id')  # Changed from 'id' to 'agent_id'
         if not agent_id:
-            api_logger.error(f"No agent ID in response: {result}")
+            print(f"ERROR: No agent ID in response: {result}")
             raise ValueError(f"Agent creation succeeded but no ID returned: {result}")
         
-        api_logger.info(f"Agent created successfully with ID: {agent_id}")
+        print(f"Agent created successfully with ID: {agent_id}")
         return result
         
     except Exception as e:
-        api_logger.error(f"Failed to create Lyzr agent: {e}")
+        print(f"ERROR: Failed to create Lyzr agent: {e}")
         raise
 
 def create_lyzr_rag_kb(name: str = "Interview Knowledge Base", api_key: str = None) -> Dict:
@@ -430,29 +429,29 @@ def create_lyzr_rag_kb(name: str = "Interview Knowledge Base", api_key: str = No
         }
         
         # Log the request data for debugging
-        api_logger.info(f"Sending RAG KB creation request: {data}")
+        print(f"Sending RAG KB creation request: {data}")
         
         response = requests.post(LYZR_CREATE_RAG_URL, headers=headers, json=data)
         
         # Log response details for debugging
-        api_logger.info(f"RAG KB creation response status: {response.status_code}")
+        print(f"RAG KB creation response status: {response.status_code}")
         if not response.ok:
-            api_logger.error(f"RAG KB creation failed with response: {response.text}")
+            print(f"ERROR: RAG KB creation failed with response: {response.text}")
         
         response.raise_for_status()
         
         result = response.json()
-        api_logger.info(f"RAG KB creation response: {result}")
+        print(f"RAG KB creation response: {result}")
         rag_id = result.get('id')
         if not rag_id:
-            api_logger.error(f"No RAG ID in response: {result}")
+            print(f"ERROR: No RAG ID in response: {result}")
             raise ValueError(f"RAG KB creation succeeded but no ID returned: {result}")
         
-        api_logger.info(f"RAG KB created successfully with ID: {rag_id}")
+        print(f"RAG KB created successfully with ID: {rag_id}")
         return result
         
     except Exception as e:
-        api_logger.error(f"Failed to create Lyzr RAG KB: {e}")
+        print(f"ERROR: Failed to create Lyzr RAG KB: {e}")
         raise
 
 def link_agent_with_rag(agent_id: str, rag_id: str, agent_name: str, agent_prompt: str, rag_name: str = "Interview Knowledge Base", api_key: str = None) -> Dict:
@@ -518,21 +517,21 @@ def link_agent_with_rag(agent_id: str, rag_id: str, agent_name: str, agent_promp
             "response_format": {"type": "text"}
         }
         
-        api_logger.info(f"Sending agent linking request: {data}")
+        print(f"Sending agent linking request: {data}")
         response = requests.put(url, headers=headers, json=data)
         
-        api_logger.info(f"Agent linking response status: {response.status_code}")
+        print(f"Agent linking response status: {response.status_code}")
         if not response.ok:
-            api_logger.error(f"Agent linking failed with response: {response.text}")
+            print(f"ERROR: Agent linking failed with response: {response.text}")
         
         response.raise_for_status()
         
         result = response.json()
-        api_logger.info(f"Agent {agent_id} linked with RAG {rag_id} successfully")
+        print(f"Agent {agent_id} linked with RAG {rag_id} successfully")
         return result
         
     except Exception as e:
-        api_logger.error(f"Failed to link agent {agent_id} with RAG {rag_id}: {e}")
+        print(f"ERROR: Failed to link agent {agent_id} with RAG {rag_id}: {e}")
         raise
 
 def train_text_directly(
@@ -560,18 +559,18 @@ def train_text_directly(
         Training response
     """
     try:
-        interview_processing_logger.info(f"Starting direct text training for rag_id: {rag_id}")
-        interview_processing_logger.info(f"Text content length: {len(text_content)} characters")
+        print(f"Starting direct text training for rag_id: {rag_id}")
+        print(f"Text content length: {len(text_content)} characters")
         
         lyzr_key = api_key
         if not lyzr_key:
-            interview_processing_logger.error("No Lyzr API key provided for direct text training")
+            print("ERROR: No Lyzr API key provided for direct text training")
             raise ValueError("No Lyzr API key provided")
 
         url = f"{LYZR_TRAIN_TXT_URL}?rag_id={rag_id}"
-        interview_processing_logger.info(f"Training URL: {url}")
+        print(f"Training URL: {url}")
         
-        interview_processing_logger.info("Preparing multipart/form-data payload for text training")
+        print("Preparing multipart/form-data payload for text training")
         
         # Create a text file in memory
         text_bytes = text_content.encode('utf-8')
@@ -595,48 +594,48 @@ def train_text_directly(
             'x-api-key': lyzr_key
         }
         
-        interview_processing_logger.info(f"File: chat_interview.txt, size: {len(text_bytes)} bytes, type: text/plain")
-        interview_processing_logger.info(f"Request headers (without API key): {dict((k, v) for k, v in headers.items() if k != 'x-api-key')}")
+        print(f"File: chat_interview.txt, size: {len(text_bytes)} bytes, type: text/plain")
+        print(f"Request headers (without API key): {dict((k, v) for k, v in headers.items() if k != 'x-api-key')}")
         
-        interview_processing_logger.info("🚀 Sending direct text training request to Lyzr API with multipart/form-data")
-        interview_processing_logger.info(f"📤 Upload Details:")
-        interview_processing_logger.info(f"   - URL: {url}")
-        interview_processing_logger.info(f"   - Method: POST")
-        interview_processing_logger.info(f"   - Content-Type: multipart/form-data (auto-generated)")
-        interview_processing_logger.info(f"   - File name: chat_interview.txt")
-        interview_processing_logger.info(f"   - File size: {len(text_bytes)} bytes")
-        interview_processing_logger.info(f"   - RAG ID: {rag_id}")
-        interview_processing_logger.info(f"   - Data Parser: {data_parser}")
-        interview_processing_logger.info(f"   - Chunk Size: {chunk_size}")
-        interview_processing_logger.info(f"   - Chunk Overlap: {chunk_overlap}")
+        print("🚀 Sending direct text training request to Lyzr API with multipart/form-data")
+        print(f"📤 Upload Details:")
+        print(f"   - URL: {url}")
+        print(f"   - Method: POST")
+        print(f"   - Content-Type: multipart/form-data (auto-generated)")
+        print(f"   - File name: chat_interview.txt")
+        print(f"   - File size: {len(text_bytes)} bytes")
+        print(f"   - RAG ID: {rag_id}")
+        print(f"   - Data Parser: {data_parser}")
+        print(f"   - Chunk Size: {chunk_size}")
+        print(f"   - Chunk Overlap: {chunk_overlap}")
         
         response = requests.post(url, files=files, data=data, headers=headers, timeout=120)
 
-        interview_processing_logger.info(f"📥 Training response status code: {response.status_code}")
-        interview_processing_logger.info(f"📥 Training response headers: {dict(response.headers)}")
-        interview_processing_logger.info(f"📥 Training response content: {response.text}")
+        print(f"📥 Training response status code: {response.status_code}")
+        print(f"📥 Training response headers: {dict(response.headers)}")
+        print(f"📥 Training response content: {response.text}")
 
         if not response.ok:
-            interview_processing_logger.error(f"❌ Direct text training failed with status {response.status_code}")
-            interview_processing_logger.error(f"❌ Response content: {response.text}")
-            interview_processing_logger.error(f"❌ This suggests the upload format or parameters are incorrect")
+            print(f"❌ ERROR: Direct text training failed with status {response.status_code}")
+            print(f"❌ ERROR: Response content: {response.text}")
+            print(f"❌ This suggests the upload format or parameters are incorrect")
             response.raise_for_status()
         
         try:
             result = response.json()
-            interview_processing_logger.info(f"✅ Direct text training completed successfully for rag_id: {rag_id}")
-            interview_processing_logger.info(f"📊 Training response keys: {list(result.keys()) if isinstance(result, dict) else 'Not a dict'}")
-            interview_processing_logger.info(f"📊 Training result: {result}")
+            print(f"✅ Direct text training completed successfully for rag_id: {rag_id}")
+            print(f"📊 Training response keys: {list(result.keys()) if isinstance(result, dict) else 'Not a dict'}")
+            print(f"📊 Training result: {result}")
             return result
         except json.JSONDecodeError as json_err:
-            interview_processing_logger.error(f"❌ Failed to parse JSON response: {json_err}")
-            interview_processing_logger.error(f"❌ Raw response: {response.text}")
+            print(f"❌ ERROR: Failed to parse JSON response: {json_err}")
+            print(f"❌ ERROR: Raw response: {response.text}")
             raise Exception(f"Invalid JSON response from training API: {response.text}")
             
     except Exception as e:
-        interview_processing_logger.error(f"Failed to train text directly for rag_id {rag_id}: {e}", exc_info=True)
-        interview_processing_logger.error(f"Error type: {type(e).__name__}")
-        interview_processing_logger.error(f"Error details: {str(e)}")
+        print(f"ERROR: Failed to train text directly for rag_id {rag_id}: {e}")
+        print(f"ERROR: Error type: {type(e).__name__}")
+        print(f"ERROR: Error details: {str(e)}")
         raise
 
 def generate_signed_url(s3_key: str, expiration: int = 3600) -> str:
@@ -663,11 +662,11 @@ def generate_signed_url(s3_key: str, expiration: int = 3600) -> str:
             ExpiresIn=expiration
         )
         
-        api_logger.info(f"Generated signed URL for {s3_key} (expires in {expiration} seconds)")
+        print(f"Generated signed URL for {s3_key} (expires in {expiration} seconds)")
         return signed_url
         
     except Exception as e:
-        api_logger.error(f"Failed to generate signed URL for {s3_key}: {e}")
+        print(f"ERROR: Failed to generate signed URL for {s3_key}: {e}")
         raise
 
 def get_s3_key_from_url(s3_url: str) -> str:
@@ -683,5 +682,5 @@ def get_s3_key_from_url(s3_url: str) -> str:
         
         return key
     except Exception as e:
-        api_logger.error(f"Failed to extract S3 key from URL {s3_url}: {e}")
+        print(f"ERROR: Failed to extract S3 key from URL {s3_url}: {e}")
         raise

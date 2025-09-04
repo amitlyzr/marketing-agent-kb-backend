@@ -7,12 +7,6 @@ from pymongo import MongoClient
 from datetime import datetime, timedelta, timezone
 
 from dotenv import load_dotenv
-from logger_config import (
-    scheduler_logger, 
-    email_logger,
-    log_email_operation,
-    log_scheduler_event
-)
 load_dotenv()
 
 URL = os.getenv("MONGODB_URL")
@@ -28,10 +22,10 @@ try:
     
     # Test connection
     client.admin.command('ping')
-    scheduler_logger.info("Successfully connected to MongoDB for scheduler", extra={'database': 'data_collection_agent'})
+    print("Successfully connected to MongoDB for scheduler")
     
 except Exception as e:
-    scheduler_logger.critical(f"Failed to connect to MongoDB: {e}", extra={'error_type': 'database_connection'})
+    print(f"Failed to connect to MongoDB: {e}")
     raise
 
 API_BASE_URL = os.getenv("API_BASE_URL") or "http://localhost:8000"
@@ -47,7 +41,7 @@ def update_email_status_via_api(user_id, email_address, status, error_message=No
         response = requests.put(url, params=params)
         return response.status_code == 200
     except Exception as e:
-        scheduler_logger.error(f"API update failed for {email_address}: {e}")
+        print(f"API update failed for {email_address}: {e}")
         return False
 
 # Send email via SMTP
@@ -81,7 +75,7 @@ def send_email_smtp(to_email, subject, body, smpt_config, user_id=None):
             server.login(SMTP_USERNAME, SMTP_PASSWORD)
             server.send_message(msg)
         
-        log_email_operation(email_logger, "send", to_email, user_id, True, f"Subject: {subject}")
+        print(f"Email sent successfully to {to_email} - Subject: {subject}")
         
         if user_id:
             update_email_status_via_api(user_id, to_email, "sent")
@@ -90,21 +84,21 @@ def send_email_smtp(to_email, subject, body, smpt_config, user_id=None):
         
     except smtplib.SMTPRecipientsRefused as e:
         error_msg = f"Recipient refused: {e}"
-        log_email_operation(email_logger, "send", to_email, user_id, False, error_msg)
+        print(f"Email send failed - {error_msg} for {to_email}")
         if user_id:
             update_email_status_via_api(user_id, to_email, "bounced", error_msg)
         return False
         
     except smtplib.SMTPAuthenticationError as e:
         error_msg = f"SMTP Authentication failed: {e}"
-        log_email_operation(email_logger, "send", to_email, user_id, False, error_msg)
+        print(f"Email send failed - {error_msg} for {to_email}")
         if user_id:
             update_email_status_via_api(user_id, to_email, "failed", error_msg)
         return False
         
     except Exception as e:
         error_msg = f"Email sending failed: {e}"
-        log_email_operation(email_logger, "send", to_email, user_id, False, error_msg)
+        print(f"Email send failed - {error_msg} for {to_email}")
         if user_id:
             update_email_status_via_api(user_id, to_email, "failed", error_msg)
         return False
@@ -194,7 +188,7 @@ def record_sent_email(user_id, email_address, subject, body, follow_up_num, stat
     try:
         email_contents_col.insert_one(email_record)
     except Exception as e:
-        scheduler_logger.error(f"Failed to record email: {e}")
+        print(f"Failed to record email: {e}")
 
 # New function to auto-start interviews at scheduled time
 def auto_start_interviews_if_needed():
@@ -216,7 +210,7 @@ def auto_start_interviews_if_needed():
         try:
             scheduled_hour, scheduled_minute = map(int, scheduled_time.split(":"))
         except:
-            scheduler_logger.error(f"Invalid time format for user {user_id}: {scheduled_time}")
+            print(f"Invalid time format for user {user_id}: {scheduled_time}")
             continue
             
         # Use LOCAL time for comparison
@@ -243,7 +237,7 @@ def auto_start_interviews_if_needed():
         if daily_trigger_marker:
             continue  # Already triggered today
             
-        scheduler_logger.info(f"Daily email trigger for user {user_id} at {scheduled_time}")
+        print(f"Daily email trigger for user {user_id} at {scheduled_time}")
         
         # Get all pending emails for this user that were uploaded BEFORE today's trigger time
         # Only process emails that were uploaded before the scheduled time today
@@ -303,8 +297,7 @@ def auto_start_interviews_if_needed():
             upsert=True
         )
         
-        log_scheduler_event(scheduler_logger, "daily_trigger", 
-                           details=f"User {user_id}: {interviews_started} interviews started")
+        print(f"User {user_id}: {interviews_started} interviews started")
 
 # Scheduler logic
 def run_scheduler():
@@ -452,16 +445,16 @@ def run_scheduler():
             )
 
     if emails_sent > 0:
-        scheduler_logger.info(f"Emails sent: {emails_sent}")
+        print(f"Emails sent: {emails_sent}")
 
 # Entry point
 if __name__ == "__main__":
-    scheduler_logger.info("Starting Marketing Agent Email Scheduler")
+    print("Starting Marketing Agent Email Scheduler")
     
     while True:
         try:
             run_scheduler()
         except Exception as e:
-            scheduler_logger.error(f"Scheduler error: {e}")
+            print(f"Scheduler error: {e}")
         
         time.sleep(300)  # run every 5 minutes
