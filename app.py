@@ -635,8 +635,7 @@ def set_smtp(smtp: SMTPCreds):
         return smtp
         
     except Exception as e:
-        print(f"Failed to set SMTP credentials for user {smtp.user_id}: {e}",
-                        extra={'user_id': smtp.user_id, 'error_type': 'smtp_config'})
+        print(f"Failed to set SMTP credentials for user {smtp.user_id}: {e}")
         raise HTTPException(status_code=500, detail="Failed to configure SMTP")
 
 @app.get("/smtp/{user_id}")
@@ -649,13 +648,14 @@ def get_smtp(user_id: str):
             print(f"SMTP config not found for user: {user_id}")
             raise HTTPException(status_code=404, detail="SMTP config not found")
             
-        smtp["_id"] = str(smtp["_id"])  # Convert ObjectId to string        return smtp
+        smtp["_id"] = str(smtp["_id"])  # Convert ObjectId to string
+        
+        return smtp
         
     except HTTPException:
         raise
     except Exception as e:
-        print(f"Failed to fetch SMTP config for user {user_id}: {e}",
-                        extra={'user_id': user_id, 'error_type': 'smtp_retrieval'})
+        print(f"Failed to fetch SMTP config for user {user_id}: {e}")
         raise HTTPException(status_code=500, detail="Failed to fetch SMTP config")
 
 ## -----------------
