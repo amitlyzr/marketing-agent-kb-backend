@@ -2,10 +2,6 @@ import os
 import time
 import smtplib
 import requests
-import os
-import time
-import smtplib
-import requests
 from email.message import EmailMessage
 from pymongo import MongoClient
 from datetime import datetime, timedelta, timezone

@@ -1,9 +1,9 @@
-from fastapi import FastAPI, HTTPException, UploadFile, File, Request
+from fastapi import FastAPI, HTTPException, UploadFile, File, Request, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, EmailStr
-from typing import Optional
-from datetime import datetime, timezone
+from typing import Optional, List, Dict, Any
+from datetime import datetime, timezone, timedelta
 import csv
 import io
 import os
@@ -13,6 +13,7 @@ import requests
 import asyncio
 import urllib.parse
 from pymongo import MongoClient
+from bson import ObjectId
 
 from dotenv import load_dotenv
 from logger_config import (
@@ -30,13 +31,15 @@ from pdf_utils import (
     create_lyzr_rag_kb,
     link_agent_with_rag,
     upload_pdf_to_s3,
-    train_pdf_directly,
     train_text_directly,
-    process_completed_interview,
+    generate_signed_url,
+    get_s3_key_from_url
 )
 load_dotenv()
 
 URL = os.getenv("MONGODB_URL")
+S3_BUCKET = os.getenv("AWS_S3_BUCKET")
+AWS_REGION = os.getenv("AWS_REGION")
 
 app = FastAPI()
 
@@ -1056,7 +1059,7 @@ async def send_interview_message_stream(chat_msg: ChatMessage):
                 "last_message_at": datetime.now(timezone.utc),
                 "agent_type": "interview_agent",
                 "started_at": datetime.now(timezone.utc),
-                "message_count": 1  # Start with 1 for the first message
+                "message_count": 1
             }
             chat_sessions_col.insert_one(session_data)
             message_count = 1
@@ -1070,7 +1073,7 @@ async def send_interview_message_stream(chat_msg: ChatMessage):
                     "agent_type": "interview_agent"
                 },
                 "$inc": {
-                    "message_count": 1  # Increment message count for interviews
+                    "message_count": 1
                 }
             }
             
@@ -1094,12 +1097,21 @@ async def send_interview_message_stream(chat_msg: ChatMessage):
                     'Content-Type': 'application/json',
                     'x-api-key': api_key
                 }
+
+                # email = ''
+                # if '+' in chat_msg.session_id:
+                #     email = chat_msg.session_id.split('+', 1)[1]
+
                 data = {
                     'user_id': chat_msg.user_id,
                     'agent_id': actual_agent_id,
                     'session_id': chat_msg.session_id,
                     'message': chat_msg.message,
-                    'system_prompt_variables': {}
+                    # 'system_prompt_variables': {
+                    #     'session_id': chat_msg.session_id,
+                    #     'user_id': chat_msg.user_id,
+                    #     'email': email
+                    # },
                 }
                 
                 # Make streaming request to Lyzr API
@@ -1171,34 +1183,33 @@ async def send_chat_agent_message_stream(chat_msg: ChatMessage):
             raise HTTPException(status_code=400, detail="No chat agent found. Please create a chat agent first.")
         
         # Create or update chat session record (NO message_count to avoid conflicts)
-        session_filter = {
-            "user_id": chat_msg.user_id,
-            "session_id": chat_msg.session_id
-        }
+        # session_filter = {
+        #     "user_id": chat_msg.user_id,
+        #     "session_id": chat_msg.session_id
+        # }
         
-        session_update = {
-            "$set": {
-                "user_id": chat_msg.user_id,
-                "session_id": chat_msg.session_id,
-                "agent_id": actual_agent_id,
-                "session_status": "active",
-                "last_message_at": datetime.now(timezone.utc),
-                "agent_type": "chat_agent"
-            },
-            "$setOnInsert": {
-                "started_at": datetime.now(timezone.utc)
-            }
-        }
+        # session_update = {
+        #     "$set": {
+        #         "user_id": chat_msg.user_id,
+        #         "session_id": chat_msg.session_id,
+        #         "agent_id": actual_agent_id,
+        #         "session_status": "active",
+        #         "last_message_at": datetime.now(timezone.utc),
+        #         "agent_type": "chat_agent"
+        #     },
+        #     "$setOnInsert": {
+        #         "started_at": datetime.now(timezone.utc)
+        #     }
+        # }
         
-        chat_sessions_col.update_one(session_filter, session_update, upsert=True)
+        # chat_sessions_col.update_one(session_filter, session_update, upsert=True)
         
-        log_database_operation(api_logger, "UPSERT", "chat_sessions", chat_msg.user_id, 
-                             f"Chat agent session updated, session: {chat_msg.session_id}")
+        # log_database_operation(api_logger, "UPSERT", "chat_sessions", chat_msg.user_id, 
+        #                      f"Chat agent session updated, session: {chat_msg.session_id}")
         
         # Use streaming response for chat agent
         async def generate_stream():
             try:
-                # Prepare request to Lyzr streaming API
                 headers = {
                     'Content-Type': 'application/json',
                     'x-api-key': api_key
@@ -1393,87 +1404,57 @@ def complete_interview_by_session(session_id: str):
 
 @app.post("/interview/process")
 def process_interview_completion(request: InterviewProcessRequest):
+    """Process completed interview: get chat history, generate PDF, and upload to S3 (NO KB training)"""
     try:
         token = f"{request.user_id}-{request.email}"
         session_id = f"{request.user_id}+{request.email}"
         
+        # Get user account
         user_account = accounts_col.find_one({"user_id": request.user_id})
         if not user_account:
             raise HTTPException(status_code=404, detail="User account not found")
         
         api_key = user_account.get("api_key")
-        rag_id = user_account.get("rag_id")
-        
         if not api_key:
             raise HTTPException(status_code=400, detail="No API key found for user")
-        if not rag_id:
-            raise HTTPException(status_code=400, detail="No RAG ID provided or found for user")
         
+        # Step 1: Get chat history
+        api_logger.info(f"Step 1: Getting chat history for session: {session_id}")
         chat_history = get_chat_history(session_id=session_id, api_key=api_key)
         if not chat_history:
             raise HTTPException(status_code=404, detail="No chat history found")
         
-        # text_content = ""
-        # for message in chat_history:
-        #     role = message.get('role', 'unknown')
-        #     content = message.get('content', '')
-        #     created_at = message.get('created_at', '')
-            
-        #     text_content += f"[{role.upper()}] {content}\n"
-        #     if created_at:
-        #         text_content += f"Time: {created_at}\n"
-        #     text_content += "\n"
-        
+        # Step 2: Generate PDF from chat history
+        api_logger.info(f"Step 2: Generating PDF for session: {session_id}")
         pdf_file = create_simple_pdf_from_text(json.dumps(chat_history, indent=2))
         pdf_content = pdf_file.getvalue()
-
+        
+        # Step 3: Upload PDF to S3
         s3_upload_success = False
         s3_url = None
         s3_error = None
+        signed_url = None
         
         try:
-            s3_url = upload_pdf_to_s3(pdf_content, request.user_id, request.email, session_id)
+            api_logger.info(f"Step 3: Uploading PDF to S3 for session: {session_id}")
+            upload_result = upload_pdf_to_s3(pdf_content, request.user_id, request.email, session_id)
+            s3_url = upload_result['s3_url']
+            signed_url = upload_result['signed_url']
             s3_upload_success = True
+            api_logger.info(f"Successfully uploaded PDF to S3: {s3_url}")
         except Exception as s3_exception:
             s3_error = str(s3_exception)
+            api_logger.error(f"S3 upload failed: {s3_error}")
         
-        training_error = None
-        
-        # TODO: Uncomment when ready to enable KB training in production
-        # try:
-        #     training_result = train_text_directly(
-        #         text_content=text_content,
-        #         rag_id=rag_id,
-        #         api_key=api_key,
-        #         data_parser="simple",
-        #         chunk_size=1000,
-        #         chunk_overlap=100,
-        #         extra_info="{}"
-        #     )
-        #     training_success = True
-        # except Exception as training_exception:
-        #     training_error = str(training_exception)
-        #     training_result = {
-        #         "success": False,
-        #         "error": training_error,
-        #         "error_type": type(training_exception).__name__
-        #     }
-        
-        # Temporarily skip KB training
-        training_success = True
-        training_result = {"message": "KB training temporarily disabled for testing"}
-        
-        # Update database records
+        # Step 4: Update database records
+        api_logger.info(f"Step 4: Updating database records for session: {session_id}")
         update_data = {
             "status": "processed",
             "processed_at": datetime.utcnow(),
             "session_id": session_id,
             "pdf_generated": True,
             "pdf_size_bytes": len(pdf_content),
-            "text_content_length": len(text_content),
             "s3_upload_success": s3_upload_success,
-            "training_success": training_success,
-            "rag_id": rag_id,
             "chat_messages_count": len(chat_history)
         }
         
@@ -1481,17 +1462,15 @@ def process_interview_completion(request: InterviewProcessRequest):
             update_data["pdf_s3_url"] = s3_url
         if s3_error:
             update_data["s3_error"] = s3_error
-        if training_result:
-            update_data["training_result"] = training_result
-        if training_error:
-            update_data["training_error"] = training_error
         
+        # Update interview record
         interviews_col.update_one(
             {"token": token},
             {"$set": update_data},
             upsert=True
         )
         
+        # Update chat session record
         chat_sessions_col.update_one(
             {"session_id": session_id},
             {"$set": {
@@ -1500,16 +1479,16 @@ def process_interview_completion(request: InterviewProcessRequest):
                 "pdf_generated": True,
                 "pdf_size_bytes": len(pdf_content),
                 "s3_upload_success": s3_upload_success,
-                "training_success": training_success,
                 "pdf_s3_url": s3_url if s3_url else None
             }}
         )
         
+        # Build success message
         success_parts = ["Chat history collected", "PDF generated"]
         if s3_upload_success:
             success_parts.append("uploaded to S3")
-        if training_success:
-            success_parts.append("text trained to KB")
+        
+        api_logger.info(f"Interview processing completed for session: {session_id}")
         
         return {
             "message": f"Interview processed successfully: {', '.join(success_parts)}",
@@ -1524,27 +1503,30 @@ def process_interview_completion(request: InterviewProcessRequest):
             },
             "step_2_pdf_creation": {
                 "success": True,
-                "pdf_size_bytes": len(pdf_content),
-                "text_content_length": len(text_content)
+                "pdf_size_bytes": len(pdf_content)
             },
             "step_3_s3_upload": {
                 "success": s3_upload_success,
                 "s3_url": s3_url,
+                "signed_url": signed_url,
                 "error": s3_error
             },
-            "rag_id": rag_id
+            "kb_training_note": "KB training is handled separately via dedicated endpoints"
         }
         
     except HTTPException:
         raise
     except Exception as e:
+        api_logger.error(f"Failed to process interview: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to process interview: {str(e)}")
 
-@app.post("/interview/test-kb-training")
-def test_kb_training(request: InterviewProcessRequest):
+@app.post("/interview/kb-training")
+def train_kb_with_session(request: InterviewProcessRequest):
+    """Dedicated endpoint for training KB with chat session data"""
     try:
         session_id = f"{request.user_id}+{request.email}"
         
+        # Get user account
         user_account = accounts_col.find_one({"user_id": request.user_id})
         if not user_account:
             raise HTTPException(status_code=404, detail="User account not found")
@@ -1555,12 +1537,15 @@ def test_kb_training(request: InterviewProcessRequest):
         if not api_key:
             raise HTTPException(status_code=400, detail="No API key found for user")
         if not rag_id:
-            raise HTTPException(status_code=400, detail="No RAG ID provided or found for user")
+            raise HTTPException(status_code=400, detail="No RAG ID found for user")
         
+        # Get chat history
+        api_logger.info(f"Training KB with session data: {session_id}")
         chat_history = get_chat_history(session_id=session_id, api_key=api_key)
         if not chat_history:
             raise HTTPException(status_code=404, detail="No chat history found")
         
+        # Prepare text content for training
         text_content = ""
         for message in chat_history:
             role = message.get('role', 'unknown')
@@ -1572,11 +1557,13 @@ def test_kb_training(request: InterviewProcessRequest):
                 text_content += f"Time: {created_at}\n"
             text_content += "\n"
         
+        # Train KB
         training_success = False
         training_result = {}
         training_error = None
         
         try:
+            api_logger.info(f"Training KB for rag_id: {rag_id}")
             training_result = train_text_directly(
                 text_content=text_content,
                 rag_id=rag_id,
@@ -1587,6 +1574,19 @@ def test_kb_training(request: InterviewProcessRequest):
                 extra_info="{}"
             )
             training_success = True
+            api_logger.info(f"KB training successful for rag_id: {rag_id}")
+            
+            # Update database records to indicate KB was trained
+            chat_sessions_col.update_one(
+                {"session_id": session_id},
+                {"$set": {
+                    "session_status": "completed",
+                    "kb_trained": True,
+                    "kb_trained_at": datetime.utcnow(),
+                    "training_result": training_result
+                }}
+            )
+            
         except Exception as training_exception:
             training_error = str(training_exception)
             training_result = {
@@ -1594,57 +1594,124 @@ def test_kb_training(request: InterviewProcessRequest):
                 "error": training_error,
                 "error_type": type(training_exception).__name__
             }
+            api_logger.error(f"KB training failed: {training_error}")
+            
+            # Update database records to indicate training failure
+            chat_sessions_col.update_one(
+                {"session_id": session_id},
+                {"$set": {
+                    "session_status": "failed",
+                    "kb_trained": False,
+                    "kb_training_failed_at": datetime.utcnow(),
+                    "training_error": training_error
+                }}
+            )
         
         return {
-            "message": f"KB training test {'completed successfully' if training_success else 'failed'}",
+            "message": f"KB training {'completed successfully' if training_success else 'failed'}",
             "user_id": request.user_id,
             "email": request.email,
             "session_id": session_id,
-            "test_type": "kb_training_only",
-            "chat_history_collected": {
-                "success": True,
-                "messages_count": len(chat_history)
-            },
-            "text_content_prepared": {
-                "success": True,
-                "text_length": len(text_content),
-                "preview": text_content[:200] + "..." if len(text_content) > 200 else text_content
-            },
-            "kb_training_test": {
-                "success": training_success,
-                "training_result": training_result,
-                "error": training_error,
-                "rag_id": rag_id,
-                "api_key_provided": bool(api_key),
-                "training_params": {
-                    "data_parser": "simple",
-                    "chunk_size": 1000,
-                    "chunk_overlap": 100,
-                    "extra_info": "{}"
-                }
-            }
+            "rag_id": rag_id,
+            "training_success": training_success,
+            "training_result": training_result,
+            "training_error": training_error,
+            "chat_messages_processed": len(chat_history),
+            "text_content_length": len(text_content)
         }
         
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to test KB training: {str(e)}")
+        api_logger.error(f"Failed to train KB with session: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to train KB: {str(e)}")
 
 
 ## -------------------
 ## KNOWLEDGE BASE RETRIEVAL ENDPOINTS
 ## -------------------
+def get_signed_pdf_url(pdf_info: Dict[str, Any]) -> Dict[str, Any]:
+    """Generate a signed URL for a PDF and update the PDF info with signed URL"""
+    try:
+        if not pdf_info.get('pdf_url'):
+            return pdf_info
+            
+        # Extract S3 key from URL
+        s3_key = pdf_info['pdf_url'].replace(f'https://{S3_BUCKET}.s3.{AWS_REGION}.amazonaws.com/', '')
+        
+        # Generate signed URL (valid for 1 hour)
+        signed_url = generate_signed_url(s3_key)
+        
+        # Update the PDF info with signed URL
+        pdf_info['signed_url'] = signed_url
+        pdf_info['signed_url_expires_at'] = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
+        
+        return pdf_info
+    except Exception as e:
+        api_logger.error(f"Failed to generate signed URL for PDF: {e}")
+        # Return original info if signing fails
+        return pdf_info
+
+@app.get("/knowledge-base/pdfs/{pdf_id}/signed-url")
+async def get_pdf_signed_url(pdf_id: str):
+    """Generate a signed URL for a specific PDF by ID"""
+    try:
+        api_logger.info(f"Generating signed URL for PDF: {pdf_id}")
+        
+        # First try to find in chat sessions
+        pdf_info = chat_sessions_col.find_one({
+            "_id": ObjectId(pdf_id),
+            "pdf_s3_url": {"$exists": True, "$ne": None}
+        })
+        
+        # If not found in chat sessions, try interviews
+        if not pdf_info:
+            pdf_info = interviews_col.find_one({
+                "_id": ObjectId(pdf_id),
+                "pdf_s3_url": {"$exists": True, "$ne": None}
+            })
+        
+        if not pdf_info:
+            raise HTTPException(status_code=404, detail="PDF not found")
+            
+        # Prepare the PDF info in the expected format
+        pdf_data = {
+            "id": str(pdf_info.get("_id")),
+            "email": pdf_info.get("email", "Unknown"),
+            "session_id": pdf_info.get("session_id"),
+            "pdf_url": pdf_info.get("pdf_s3_url"),
+            "completed_at": pdf_info.get("processed_at", pdf_info.get("completed_at")),
+            "message_count": pdf_info.get("message_count", 0),
+            "type": "chat_session" if "chat_sessions_col" in str(pdf_info) else "interview",
+            "kb_trained": pdf_info.get("kb_trained", False)
+        }
+        
+        # Generate and return signed URL
+        result = await asyncio.to_thread(get_signed_pdf_url, pdf_data)
+        return {
+            "signed_url": result["signed_url"],
+            "expires_at": result["signed_url_expires_at"]
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        api_logger.error(f"Failed to generate signed URL for PDF {pdf_id}: {e}")
+        raise HTTPException(status_code=500, detail="Failed to generate signed URL")
+
 @app.get("/knowledge-base/pdfs/{user_id}")
-def get_user_kb_pdfs(user_id: str):
-    """Get all processed PDFs for a user's knowledge base"""
+async def get_user_kb_pdfs(user_id: str):
+    """Get all processed PDFs for a user's knowledge base with signed URLs"""
     try:
         api_logger.info(f"Fetching KB PDFs for user: {user_id}")
 
+        # Fetch chat sessions with PDFs
         chat_sessions = list(chat_sessions_col.find({
             "user_id": user_id,
             "pdf_s3_url": {"$exists": True, "$ne": None}
         }))
 
+        # Fetch interviews with PDFs
         interviews = list(interviews_col.find({
             "user_id": user_id,
             "pdf_s3_url": {"$exists": True, "$ne": None}
@@ -1653,6 +1720,7 @@ def get_user_kb_pdfs(user_id: str):
         pdfs = []
         seen_session_ids = set()
         
+        # Process chat sessions
         for session in chat_sessions:
             email = session.get("email", "Unknown")
             session_id = session.get("session_id")
@@ -1664,7 +1732,7 @@ def get_user_kb_pdfs(user_id: str):
                 continue
                 
             seen_session_ids.add(session_id)
-            pdfs.append({
+            pdf_info = {
                 "id": str(session.get("_id")),
                 "email": email,
                 "session_id": session_id,
@@ -1673,8 +1741,12 @@ def get_user_kb_pdfs(user_id: str):
                 "message_count": session.get("message_count", 0),
                 "type": "chat_session",
                 "kb_trained": session.get("kb_trained", False)
-            })
+            }
+            
+            # Generate signed URL for the PDF
+            pdfs.append(await asyncio.to_thread(get_signed_pdf_url, pdf_info))
 
+        # Process interviews
         for interview in interviews:
             email = interview.get("email", "Unknown")
             session_id = interview.get("session_id")
@@ -1686,7 +1758,7 @@ def get_user_kb_pdfs(user_id: str):
                 continue
                 
             seen_session_ids.add(session_id)
-            pdfs.append({
+            pdf_info = {
                 "id": str(interview.get("_id")),
                 "email": email,
                 "session_id": session_id,
@@ -1695,7 +1767,10 @@ def get_user_kb_pdfs(user_id: str):
                 "message_count": interview.get("message_count", 0),
                 "type": "interview",
                 "kb_trained": interview.get("kb_trained", False)
-            })
+            }
+            
+            # Generate signed URL for the PDF
+            pdfs.append(await asyncio.to_thread(get_signed_pdf_url, pdf_info))
         
         # Sort by completion date (newest first)
         pdfs.sort(key=lambda x: x.get("completed_at") or "", reverse=True)
