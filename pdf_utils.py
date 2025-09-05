@@ -13,6 +13,7 @@ from reportlab.lib.pagesizes import letter
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.enums import TA_LEFT
+from reportlab.lib import colors
 from typing import List, Dict
 from datetime import datetime, timedelta
 from datetime import datetime, timezone
@@ -154,16 +155,16 @@ def get_s3_client():
 
 def create_simple_pdf_from_text(text: str) -> io.BytesIO:
     """
-    Create a simple PDF from plain text content
+    Create a professionally formatted PDF from chat interview content
     
     Args:
-        text: Text content to convert to PDF
+        text: JSON text content containing chat history
         
     Returns:
         PDF file object (BytesIO)
     """
     try:
-        print(f"Creating simple PDF from text, length: {len(text)} characters")
+        print(f"Creating formatted PDF from text, length: {len(text)} characters")
         
         buffer = io.BytesIO()
         
@@ -180,64 +181,155 @@ def create_simple_pdf_from_text(text: str) -> io.BytesIO:
         # Get styles
         styles = getSampleStyleSheet()
         
-        # Create custom style for content
-        content_style = ParagraphStyle(
-            'Content',
-            parent=styles['Normal'],
-            fontSize=11,
-            textColor='black',
-            spaceAfter=12,
+        # Parse JSON content to extract chat data
+        try:
+            import json
+            chat_data = json.loads(text)
+            
+            # Extract session info
+            session_id = chat_data.get('session_id', 'Unknown')
+            user_email = chat_data.get('user_email', 'Unknown')
+            messages = chat_data.get('messages', [])
+            
+            # Extract user ID and email from session_id if available
+            if '+' in session_id and '@' in session_id:
+                parts = session_id.split('+')
+                if len(parts) > 1:
+                    user_email = parts[1]
+            
+        except (json.JSONDecodeError, KeyError) as e:
+            print(f"Failed to parse JSON, treating as plain text: {e}")
+            # Fallback to plain text processing
+            session_id = "Unknown"
+            user_email = "Unknown"
+            messages = []
+        
+        # Create custom styles
+        title_style = ParagraphStyle(
+            'MainTitle',
+            parent=styles['Title'],
+            fontSize=18,
+            textColor=colors.black,
+            spaceAfter=20,
             alignment=TA_LEFT,
-            leftIndent=0,
-            rightIndent=0
+            fontName='Helvetica-Bold'
         )
         
-        title_style = ParagraphStyle(
-            'Title',
-            parent=styles['Title'],
-            fontSize=16,
-            textColor='darkblue',
-            spaceAfter=20,
-            alignment=TA_LEFT
+        header_style = ParagraphStyle(
+            'Header',
+            parent=styles['Normal'],
+            fontSize=12,
+            textColor=colors.grey,
+            spaceAfter=15,
+            alignment=TA_LEFT,
+            fontName='Helvetica'
+        )
+        
+        user_style = ParagraphStyle(
+            'UserMessage',
+            parent=styles['Normal'],
+            fontSize=11,
+            textColor=colors.blue,
+            spaceAfter=8,
+            alignment=TA_LEFT,
+            fontName='Helvetica-Bold',
+            leftIndent=20
+        )
+        
+        assistant_style = ParagraphStyle(
+            'AssistantMessage',
+            parent=styles['Normal'],
+            fontSize=11,
+            textColor=colors.black,
+            spaceAfter=12,
+            alignment=TA_LEFT,
+            fontName='Helvetica',
+            leftIndent=20
+        )
+        
+        timestamp_style = ParagraphStyle(
+            'Timestamp',
+            parent=styles['Normal'],
+            fontSize=9,
+            textColor=colors.grey,
+            spaceAfter=5,
+            alignment=TA_RIGHT,
+            fontName='Helvetica'
         )
         
         # Build story
         story = []
         
-        # Add title
-        story.append(Paragraph("Training Content", title_style))
+        # Add main title
+        story.append(Paragraph(f"Chat Interview Session - {user_email}", title_style))
         story.append(Spacer(1, 12))
         
-        # Add timestamp
+        # Add session info
+        story.append(Paragraph(f"User ID: {session_id}", header_style))
+        story.append(Paragraph(f"Email: {user_email}", header_style))
         timestamp = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')
-        story.append(Paragraph(f"Generated: {timestamp}", styles['Normal']))
+        story.append(Paragraph(f"Generated: {timestamp}", header_style))
         story.append(Spacer(1, 20))
         
-        # Process text content
-        # Handle long text by splitting into paragraphs
-        if len(text) > 50000:  # If text is very long, truncate for PDF
-            text = text[:50000] + "\n\n[Content truncated for PDF generation]"
-        
-        # Clean and format text
-        text = text.replace('\n', '<br/>')
-        text = text.replace('<', '&lt;').replace('>', '&gt;')
-        
-        # Split into chunks if text is very long to avoid ReportLab issues
-        max_chunk_size = 10000
-        if len(text) > max_chunk_size:
-            chunks = [text[i:i+max_chunk_size] for i in range(0, len(text), max_chunk_size)]
-            for i, chunk in enumerate(chunks):
-                story.append(Paragraph(chunk, content_style))
-                if i < len(chunks) - 1:  # Add spacer between chunks except for last
-                    story.append(Spacer(1, 12))
+        # Process messages if available
+        if messages:
+            for i, message in enumerate(messages):
+                role = message.get('role', 'unknown')
+                content = message.get('content', '')
+                created_at = message.get('created_at', '')
+                
+                # Format timestamp
+                if created_at:
+                    try:
+                        # Parse ISO timestamp and format nicely
+                        dt = datetime.fromisoformat(created_at.replace('Z', '+00:00'))
+                        formatted_time = dt.strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]  # Include milliseconds
+                        story.append(Paragraph(f"Time: {formatted_time}", timestamp_style))
+                    except:
+                        story.append(Paragraph(f"Time: {created_at}", timestamp_style))
+                
+                # Add message content
+                if role == 'user':
+                    story.append(Paragraph(f"<b>User:</b> {content}", user_style))
+                elif role == 'assistant':
+                    story.append(Paragraph(f"<b>Assistant:</b> {content}", assistant_style))
+                else:
+                    story.append(Paragraph(f"<b>{role.title()}:</b> {content}", assistant_style))
+                
+                # Add spacing between messages
+                if i < len(messages) - 1:
+                    story.append(Spacer(1, 15))
         else:
-            story.append(Paragraph(text, content_style))
+            # Fallback: display raw text content in a formatted way
+            content_style = ParagraphStyle(
+                'Content',
+                parent=styles['Normal'],
+                fontSize=10,
+                textColor=colors.black,
+                spaceAfter=12,
+                alignment=TA_LEFT,
+                leftIndent=0,
+                rightIndent=0,
+                fontName='Courier'
+            )
+            
+            # Clean and format text
+            clean_text = text.replace('<', '&lt;').replace('>', '&gt;')
+            # Split into smaller chunks to avoid ReportLab issues
+            max_chunk_size = 5000
+            if len(clean_text) > max_chunk_size:
+                chunks = [clean_text[i:i+max_chunk_size] for i in range(0, len(clean_text), max_chunk_size)]
+                for chunk in chunks:
+                    story.append(Paragraph(chunk, content_style))
+                    story.append(Spacer(1, 12))
+            else:
+                story.append(Paragraph(clean_text, content_style))
         
         # Build PDF
         doc.build(story)
         buffer.seek(0)
         
-        print(f"Simple PDF created successfully, size: {len(buffer.getvalue())} bytes")
+        print(f"Formatted PDF created successfully, size: {len(buffer.getvalue())} bytes")
         return buffer
         
     except Exception as e:
@@ -437,7 +529,7 @@ def create_lyzr_agent(name: str, system_prompt: str, description: str = "AI Inte
         data = {
             "name": name,
             "description": description,
-            "agent_role": "You are an Expert Interview Assistant.",
+            "agent_role": "",
             "agent_goal": "",
             "agent_instructions": system_prompt,
             "examples": None,
@@ -445,14 +537,15 @@ def create_lyzr_agent(name: str, system_prompt: str, description: str = "AI Inte
             "tool_usage_description": "{}",
             "provider_id": "OpenAI",
             "model": "gpt-4o-mini",
-            "temperature": 0.3,
+            "temperature": 0.7,
             "top_p": 0.9,
             "llm_credential_id": "lyzr_openai",
             "features": [],
             "managed_agents": [],
             "response_format": {
                 "type": "text"
-            }
+            },
+            "store_messages": True
         }
         
         # Log the request data for debugging
@@ -566,17 +659,17 @@ def link_agent_with_rag(agent_id: str, rag_id: str, agent_name: str, agent_syste
         data = {
             "name": agent_name,
             "description": f"AI Chat Agent with knowledge base integration",
-            "agent_role": "You are an Expert in Knowledge Base Retrieval.",
+            "agent_role": "",
             "agent_goal": "",
             "agent_instructions": agent_system_prompt,
             "examples": None,
             "tool": "",
             "tool_usage_description": "{}",
-            "provider_id": "Aws-Bedrock",
-            "model": "bedrock/amazon.nova-pro-v1:0",
-            "temperature": 0.3,
+            "provider_id": "OpenAI",
+            "model": "gpt-4o-mini",
+            "temperature": 0.7,
             "top_p": 0.9,
-            "llm_credential_id": "lyzr_aws-bedrock",
+            "llm_credential_id": "lyzr_openai",
             "features": [{
                 "type": "KNOWLEDGE_BASE",
                 "config": {
@@ -595,7 +688,8 @@ def link_agent_with_rag(agent_id: str, rag_id: str, agent_name: str, agent_syste
                 "priority": 0
             }],
             "managed_agents": [],
-            "response_format": {"type": "text"}
+            "response_format": {"type": "text"},
+            "store_messages": True
         }
         
         print(f"Sending agent linking request: {data}")

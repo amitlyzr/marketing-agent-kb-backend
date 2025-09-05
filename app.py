@@ -250,6 +250,41 @@ def update_account(user_id: str, updates: AccountUpdateRequest):
         print(f"Failed to update account {user_id}: {e}")
         raise HTTPException(status_code=500, detail="Failed to update account")
 
+## SMTP Credentials
+@app.post("/smtp")
+def set_smtp(smtp: SMTPCreds):
+    try:
+        print(f"Setting SMTP credentials for user: {smtp.user_id}, host: {smtp.host}")
+        
+        smtp_col.replace_one({"user_id": smtp.user_id}, smtp.dict(), upsert=True)
+        
+        print(f"Successfully configured SMTP for user: {smtp.user_id}")
+        return smtp
+        
+    except Exception as e:
+        print(f"Failed to set SMTP credentials for user {smtp.user_id}: {e}")
+        raise HTTPException(status_code=500, detail="Failed to configure SMTP")
+
+@app.get("/smtp/{user_id}")
+def get_smtp(user_id: str):
+    try:
+        print(f"Fetching SMTP credentials for user: {user_id}")
+        
+        smtp = smtp_col.find_one({"user_id": user_id})
+        if not smtp:
+            print(f"SMTP config not found for user: {user_id}")
+            raise HTTPException(status_code=404, detail="SMTP config not found")
+            
+        smtp["_id"] = str(smtp["_id"])  # Convert ObjectId to string
+        
+        return smtp
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Failed to fetch SMTP config for user {user_id}: {e}")
+        raise HTTPException(status_code=500, detail="Failed to fetch SMTP config")
+
 ## ------------------------
 ## AGENT CREATION ENDPOINTS
 ## ------------------------
@@ -598,8 +633,7 @@ def update_email_status(user_id: str, email: str, status: str, error_message: st
     except HTTPException:
         raise
     except Exception as e:
-        print(f"Error updating email status for {email}, user {user_id}: {e}",
-                        extra={'user_id': user_id, 'email': email, 'error_type': 'status_update'})
+        print(f"Error updating email status for {email}, user {user_id}: {e}")
         raise HTTPException(status_code=500, detail=f"Error updating email status: {str(e)}")
 
 @app.patch("/emails/{user_id}/{email}")
@@ -645,45 +679,6 @@ def patch_email_fields(user_id: str, email: str, updates: dict):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error updating email: {str(e)}")
 
-
-## SMTP Credentials
-@app.post("/smtp")
-def set_smtp(smtp: SMTPCreds):
-    try:
-        print(f"Setting SMTP credentials for user: {smtp.user_id}, host: {smtp.host}")
-        
-        smtp_col.replace_one({"user_id": smtp.user_id}, smtp.dict(), upsert=True)
-        
-        print(f"Successfully configured SMTP for user: {smtp.user_id}")
-        return smtp
-        
-    except Exception as e:
-        print(f"Failed to set SMTP credentials for user {smtp.user_id}: {e}")
-        raise HTTPException(status_code=500, detail="Failed to configure SMTP")
-
-@app.get("/smtp/{user_id}")
-def get_smtp(user_id: str):
-    try:
-        print(f"Fetching SMTP credentials for user: {user_id}")
-        
-        smtp = smtp_col.find_one({"user_id": user_id})
-        if not smtp:
-            print(f"SMTP config not found for user: {user_id}")
-            raise HTTPException(status_code=404, detail="SMTP config not found")
-            
-        smtp["_id"] = str(smtp["_id"])  # Convert ObjectId to string
-        
-        return smtp
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        print(f"Failed to fetch SMTP config for user {user_id}: {e}")
-        raise HTTPException(status_code=500, detail="Failed to fetch SMTP config")
-
-## -----------------
-## SCHEDULER ENDPOINTS
-## -----------------
 @app.post("/scheduler")
 def set_scheduler(s: Scheduler):
     try:
@@ -695,8 +690,7 @@ def set_scheduler(s: Scheduler):
         return s
         
     except Exception as e:
-        print(f"Failed to set scheduler for user {s.user_id}: {e}",
-                        extra={'user_id': s.user_id, 'error_type': 'scheduler_config'})
+        print(f"Failed to set scheduler for user {s.user_id}: {e}")
         raise HTTPException(status_code=500, detail="Failed to configure scheduler")
 
 @app.get("/scheduler/{user_id}")
@@ -716,13 +710,9 @@ def get_scheduler(user_id: str):
     except HTTPException:
         raise
     except Exception as e:
-        print(f"Failed to fetch scheduler for user {user_id}: {e}",
-                        extra={'user_id': user_id, 'error_type': 'scheduler_retrieval'})
+        print(f"Failed to fetch scheduler for user {user_id}: {e}")
         raise HTTPException(status_code=500, detail="Failed to fetch scheduler")
 
-## --------------------
-## INTERVIEW COLLECTION ENDPOINTS
-## --------------------
 @app.post("/interview/start")
 def start_interview(user_id: str, email: EmailStr):
     try:
@@ -744,8 +734,7 @@ def start_interview(user_id: str, email: EmailStr):
         return interview
         
     except Exception as e:
-        print(f"Failed to start interview for user {user_id}, email {email}: {e}",
-                        extra={'user_id': user_id, 'email': email, 'error_type': 'interview_start'})
+        print(f"Failed to start interview for user {user_id}, email {email}: {e}")
         raise HTTPException(status_code=500, detail="Failed to start interview")
 
 @app.post("/interview/complete/{token}")
@@ -806,8 +795,7 @@ def complete_interview(token: str):
     except HTTPException:
         raise
     except Exception as e:
-        print(f"Failed to complete interview for token {token}: {e}",
-                        extra={'token': token, 'error_type': 'interview_completion'})
+        print(f"Failed to complete interview for token {token}: {e}")
         raise HTTPException(status_code=500, detail="Failed to complete interview")
 
 @app.get("/interview/status/{user_id}/{email}")
@@ -824,8 +812,7 @@ def check_interview_status(user_id: str, email: EmailStr):
         return {"status": status}
         
     except Exception as e:
-        print(f"Failed to check interview status for user {user_id}, email {email}: {e}",
-                        extra={'user_id': user_id, 'email': email, 'error_type': 'interview_status_check'})
+        print(f"Failed to check interview status for user {user_id}, email {email}: {e}")
         raise HTTPException(status_code=500, detail="Failed to check interview status")
 
 @app.get("/interview/{token}")
@@ -868,8 +855,7 @@ def get_interview(token: str):
     except HTTPException:
         raise
     except Exception as e:
-        print(f"Failed to fetch interview for token {token}: {e}",
-                        extra={'token': token, 'error_type': 'interview_retrieval'})
+        print(f"Failed to fetch interview for token {token}: {e}")
         raise HTTPException(status_code=500, detail="Failed to fetch interview")
 
 @app.get("/interview/redirect/{token}")
@@ -914,9 +900,6 @@ def redirect_to_chat(token: str):
         print(f"Failed to redirect token {token}: {e}")
         raise HTTPException(status_code=500, detail="Failed to redirect to chat")
 
-## -------------------
-## EMAIL THREAD ENDPOINTS
-## -------------------
 @app.get("/email-thread/{user_id}/{email}")
 def get_email_thread(user_id: str, email: str):
     """Get email thread/conversation history for a specific email address"""
@@ -943,8 +926,7 @@ def get_email_thread(user_id: str, email: str):
         }
         
     except Exception as e:
-        print(f"Failed to fetch email thread for user {user_id}, email {email}: {e}",
-                        extra={'user_id': user_id, 'email': email, 'error_type': 'thread_retrieval'})
+        print(f"Failed to fetch email thread for user {user_id}, email {email}: {e}")
         raise HTTPException(status_code=500, detail="Failed to fetch email thread")
 
 @app.get("/email-threads/{user_id}")
@@ -983,14 +965,8 @@ def get_all_email_threads(user_id: str):
         return {"threads": result, "total_conversations": len(result)}
         
     except Exception as e:
-        print(f"Failed to fetch email threads for user {user_id}: {e}",
-                        extra={'user_id': user_id, 'error_type': 'threads_retrieval'})
+        print(f"Failed to fetch email threads for user {user_id}: {e}")
         raise HTTPException(status_code=500, detail="Failed to fetch email threads")
-
-
-## -------------------
-## CHAT STREAMING ENDPOINTS
-## -------------------
 
 ## Interview Agent Chat (Streaming, with message count)
 @app.post("/chat/interview/send/stream")
@@ -1131,8 +1107,7 @@ async def send_interview_message_stream(chat_msg: ChatMessage):
     except HTTPException:
         raise
     except Exception as e:
-        print(f"Failed to send interview message for user {chat_msg.user_id}: {e}",
-                        extra={'user_id': chat_msg.user_id, 'error_type': 'interview_send'})
+        print(f"Failed to send interview message for user {chat_msg.user_id}: {e}")
         raise HTTPException(status_code=500, detail="Failed to send interview message")
 
 ## Chat Agent (Streaming, no message count)
@@ -1151,40 +1126,34 @@ async def send_chat_agent_message_stream(chat_msg: ChatMessage):
         if not api_key:
             raise HTTPException(status_code=400, detail="No API key configured for this user")
         
-        # Use chat_agent_id if available, otherwise fall back to agent_id
-        actual_agent_id = user_account.get("chat_agent_id") or chat_msg.agent_id
+        # Use chat_agent_id from user account (this is the correct agent for chat)
+        actual_agent_id = user_account.get("chat_agent_id")
         if not actual_agent_id:
-            raise HTTPException(status_code=400, detail="No chat agent found. Please create a chat agent first.")
+            # Fallback to regular agent_id if chat_agent_id is not set
+            actual_agent_id = user_account.get("agent_id") or chat_msg.agent_id
+            if not actual_agent_id:
+                raise HTTPException(status_code=400, detail="No chat agent found. Please create a chat agent first.")
         
-        # Create or update chat session record (NO message_count to avoid conflicts)
-        # session_filter = {
-        #     "user_id": chat_msg.user_id,
-        #     "session_id": chat_msg.session_id
-        # }
+        print(f"🔍 AGENT ID DEBUG:")
+        print(f"   - user_account.chat_agent_id: {user_account.get('chat_agent_id')}")
+        print(f"   - user_account.agent_id: {user_account.get('agent_id')}")
+        print(f"   - chat_msg.agent_id: {chat_msg.agent_id}")
+        print(f"   - actual_agent_id selected: {actual_agent_id}")
         
-        # session_update = {
-        #     "$set": {
-        #         "user_id": chat_msg.user_id,
-        #         "session_id": chat_msg.session_id,
-        #         "agent_id": actual_agent_id,
-        #         "session_status": "active",
-        #         "last_message_at": datetime.now(timezone.utc),
-        #         "agent_type": "chat_agent"
-        #     },
-        #     "$setOnInsert": {
-        #         "started_at": datetime.now(timezone.utc)
-        #     }
-        # }
-        
-        # chat_sessions_col.update_one(session_filter, session_update, upsert=True)
-        
-        #        # Use streaming response for chat agent
+        # Use streaming response for chat agent
         async def generate_stream():
             try:
                 headers = {
                     'Content-Type': 'application/json',
                     'x-api-key': api_key
                 }
+                print(f"🔄 LYZR API REQUEST DEBUG:")
+                print(f"   - user_id: {chat_msg.user_id}")
+                print(f"   - agent_id: {actual_agent_id}")
+                print(f"   - session_id: {chat_msg.session_id}")
+                print(f"   - message: {chat_msg.message[:50]}...")
+                print(f"   - api_key: {api_key[:8]}...{api_key[-4:] if len(api_key) > 12 else '***'}")
+                
                 data = {
                     'user_id': chat_msg.user_id,
                     'agent_id': actual_agent_id,
@@ -1234,8 +1203,7 @@ async def send_chat_agent_message_stream(chat_msg: ChatMessage):
     except HTTPException:
         raise
     except Exception as e:
-        print(f"Failed to send chat agent message for user {chat_msg.user_id}: {e}",
-                        extra={'user_id': chat_msg.user_id, 'error_type': 'chat_agent_send'})
+        print(f"Failed to send chat agent message for user {chat_msg.user_id}: {e}")
         raise HTTPException(status_code=500, detail="Failed to send chat agent message")
 
 
@@ -1268,15 +1236,44 @@ def get_chat_history_api(session_id: str, agent_id: str = None):
         # Get chat history from Lyzr API
         history = get_chat_history(session_id, api_key)
         
+        # Parse session_id to get email for session lookup
+        email = session_id[last_plus_index + 1:]
+        
+        # Try to get session information from database
+        session_info = chat_sessions_col.find_one({
+            "user_id": user_id,
+            "email": email
+        })
+        
+        # If no session exists and no chat history, this is a new user
+        if not session_info and not history:
+            print(f"New user detected for session {session_id} - no existing session or chat history")
+        
         return {
             "session_id": session_id,
-            "messages": history,
-            "total_messages": len(history) if history else 0
+            "messages": history if history else [],
+            "total_messages": len(history) if history else 0,
+            "session": session_info if session_info else None,
+            "message_count": session_info.get("message_count", 0) if session_info else 0
         }
         
+    except HTTPException:
+        # Re-raise HTTP exceptions as is
+        raise
     except Exception as e:
-        print(f"Failed to fetch chat history for session {session_id}: {e}",
-                        extra={'session_id': session_id, 'error_type': 'chat_history'})
+        print(f"Failed to fetch chat history for session {session_id}: {e}")
+        
+        # For new users, don't throw an error - return empty response
+        if "404" in str(e) or "No messages found" in str(e):
+            print(f"No chat history found for new user session {session_id} - returning empty response")
+            return {
+                "session_id": session_id,
+                "messages": [],
+                "total_messages": 0,
+                "session": None,
+                "message_count": 0
+            }
+        
         raise HTTPException(status_code=500, detail="Failed to fetch chat history")
 
 
@@ -1366,8 +1363,7 @@ def complete_interview_by_session(session_id: str):
     except HTTPException:
         raise
     except Exception as e:
-        print(f"Failed to complete interview for session {session_id}: {e}",
-                        extra={'session_id': session_id, 'error_type': 'interview_complete'})
+        print(f"Failed to complete interview for session {session_id}: {e}")
         raise HTTPException(status_code=500, detail="Failed to complete interview")
 
 @app.post("/interview/process")
@@ -1417,8 +1413,17 @@ def process_interview_completion(request: InterviewProcessRequest):
             print(f"   - Chat history length: {len(chat_history) if chat_history else 0}")
             
             if not chat_history:
-                print(f"   ❌ ERROR: No chat history found for session: {session_id}")
-                raise HTTPException(status_code=404, detail="No chat history found")
+                print(f"   ⚠️  WARNING: No chat history found for session: {session_id}")
+                print(f"   - This might be a new user with no messages yet")
+                print(f"   - Returning empty response instead of error")
+                return {
+                    "message": "No chat history available for processing",
+                    "session_id": session_id,
+                    "user_id": request.user_id,
+                    "email": request.email,
+                    "chat_history": [],
+                    "processing_skipped": True
+                }
             
             print(f"   ✅ Chat history retrieved successfully")
             print(f"   - Total messages: {len(chat_history)}")
@@ -1701,7 +1706,14 @@ def train_kb_with_session(request: InterviewProcessRequest):
         print(f"Training KB with session data: {session_id}")
         chat_history = get_chat_history(session_id=session_id, api_key=api_key)
         if not chat_history:
-            raise HTTPException(status_code=404, detail="No chat history found")
+            print(f"No chat history found for session {session_id} - nothing to train")
+            return {
+                "message": "No chat history available for KB training",
+                "session_id": session_id,
+                "user_id": request.user_id,
+                "email": request.email,
+                "training_skipped": True
+            }
         
         # Prepare text content for training
         text_content = ""

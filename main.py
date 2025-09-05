@@ -111,66 +111,47 @@ def get_email_content(user_id, email_address, follow_up_num, interview_link, int
     
     # Use default email templates based on follow-up number and status
     if interview_status == "started":
-        # User has started but not completed the interview
-        subject = "Please Complete Your Interview"
-        body = f"""Hi,
-
-Thanks for starting your interview. Just a reminder to complete it here:
-{interview_link}
-
-Let us know if you have any questions.
-
-Best regards,
-The Hiring Team"""
+            # User has started but not completed the interview
+            subject = "Please Complete Your Marketing Data Collection Interview"
+            body = f"""Hi,
+                        Thanks for starting your interview. Just a reminder to complete it here:
+                        {interview_link}
+                        Best regards,
+                        The Marketing Team"""
     else:
-        # User hasn't started the interview yet (pending) - use normal follow-up sequence
-        if follow_up_num == 1:
-            subject = "You're invited for an interview!"
-            body = f"""Hi,
-
-We're excited to move forward with your application. Please complete your interview here:
-{interview_link}
-
-This interview should take about 15-20 minutes to complete.
-
-Thanks!
-The Hiring Team"""
-        elif follow_up_num == 2:
-            subject = "Friendly Reminder: Your Interview Awaits"
-            body = f"""Hi again,
-
-Just checking in — we'd still love to hear from you. Please complete your interview here:
-{interview_link}
-
-If you have any questions or need assistance, please don't hesitate to reach out.
-
-Best regards,
-The Hiring Team"""
-        elif follow_up_num == 3:
-            subject = "Final Reminder: Interview Opportunity Closing Soon"
-            body = f"""Hi,
-
-This is our final reminder about your interview opportunity. If you're still interested, please complete your interview here:
-{interview_link}
-
-We'll be closing this opportunity soon, so please respond at your earliest convenience.
-
-Thanks again for your time!
-The Hiring Team"""
-        else:
-            subject = f"Follow-up #{follow_up_num} - Interview Invitation"
-            body = f"""Hi,
-
-This is follow-up #{follow_up_num} regarding your interview opportunity.
-
-Please complete your interview here:
-{interview_link}
-
-We look forward to hearing from you.
-
-Best regards,
-The Hiring Team"""
-    
+            # User hasn't started the interview yet (pending) - use normal follow-up sequence
+            if follow_up_num == 1:
+                subject = "You're invited for a Marketing Data Collection Interview!"
+                body = f"""Hi,
+                            We, as part of marketing team really believe that some of your knowledge would be super helpful to us. Please complete this 15-min interview.
+                            {interview_link}
+                            This interview should take about 15-20 minutes to complete.
+                            Thanks!
+                            The Hiring Team"""
+            elif follow_up_num == 2:
+                subject = "Friendly Reminder: Your Marketing Data Collection Interview Awaits"
+                body = f"""Hi again,
+                            Just checking in — we'd still love to hear from you. Please complete your interview here:
+                            {interview_link}
+                            Best regards,
+                            The Hiring Team"""
+            elif follow_up_num == 3:
+                subject = "Final Reminder: Interview Closing Soon"
+                body = f"""Hi,
+                            This is our final reminder about the marketing data collection interview opportunity. Please complete your interview here:
+                            {interview_link}
+                            We'll be closing this opportunity soon, so please respond at your earliest convenience.
+                            Thanks again for your time!
+                            The Marketing Team"""
+            else:
+                subject = f"Follow-up #{follow_up_num} - Interview Invitation"
+                body = f"""Hi,
+                            This is follow-up #{follow_up_num} regarding the marketing data collection interview.
+                            Please complete your interview here:
+                            {interview_link}
+                            We look forward to hearing from you.
+                            Best regards,
+                            The Marketing Team"""
     return subject, body
 
 def record_sent_email(user_id, email_address, subject, body, follow_up_num, status="sent"):
